@@ -4,11 +4,17 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Collaborative LAN Map</title>
-  <link
-    rel="stylesheet"
-    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-  />
+  <link rel="stylesheet" href="public/css/leaflet.css" />
   <style>
+    /* User dot tooltip styling */
+    .user-dot-tooltip {
+      background: #333;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 12px;
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; font-family: 'Inter', sans-serif; background: #f0f2f5; }
 
@@ -20,7 +26,7 @@
       position: fixed;
       top: 20px;
       left: 20px;
-      z-index: 1000;
+      z-index: 2000;
       padding: 10px 20px;
       background: #4CAF50;
       color: white;
@@ -334,8 +340,8 @@
 
   <div id="status-popup"></div>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <script src="public/js/leaflet.js"></script>
+  <script src="public/js/socket.io.min.js"></script>
   <script src="map.js"></script>
 </body>
 </html>

@@ -24,17 +24,93 @@ io.on('connection', socket => {
 
   socket.on('newPin', d => {
     const clientInfo = clients.get(socket.id);
-    io.emit('pinAdded', { ...d, clientId: socket.id, clientName: clientInfo?.name });
+    // Send to host only
+    const hostSocket = Array.from(io.sockets.sockets.values()).find(s => 
+      s.handshake.query.isHost === 'true'
+    );
+    if (hostSocket) {
+      hostSocket.emit('pinAdded', { 
+        ...d, 
+        clientId: socket.id, 
+        clientName: clientInfo?.name,
+        pinColor: clientInfo?.pinColor 
+      });
+    }
+    // Send back to same client
+    socket.emit('pinAdded', { 
+      ...d, 
+      clientId: socket.id, 
+      clientName: clientInfo?.name,
+      pinColor: clientInfo?.pinColor 
+    });
   });
 
-  socket.on('removePin', id => io.emit('pinRemoved', { id, clientId: socket.id }));
-  socket.on('clearPins', () => io.emit('pinsCleared', { clientId: socket.id }));
-  socket.on('updateRadius', d => io.emit('updateRadius', { ...d, clientId: socket.id }));
-  socket.on('updateElevation', d => io.emit('updateElevation', { ...d, clientId: socket.id }));
-  socket.on('updateBearing', d => io.emit('updateBearing', { ...d, clientId: socket.id }));
+  socket.on('removePin', id => {
+    // Send to host
+    const hostSocket = Array.from(io.sockets.sockets.values()).find(s => 
+      s.handshake.query.isHost === 'true'
+    );
+    if (hostSocket) {
+      hostSocket.emit('pinRemoved', { id, clientId: socket.id });
+    }
+    // Send back to same client
+    socket.emit('pinRemoved', { id, clientId: socket.id });
+  });
+
+  socket.on('clearPins', () => {
+    const hostSocket = Array.from(io.sockets.sockets.values()).find(s => 
+      s.handshake.query.isHost === 'true'
+    );
+    if (hostSocket) {
+      hostSocket.emit('pinsCleared', { clientId: socket.id });
+    }
+    socket.emit('pinsCleared', { clientId: socket.id });
+  });
+
+  socket.on('updateRadius', d => {
+    const hostSocket = Array.from(io.sockets.sockets.values()).find(s => 
+      s.handshake.query.isHost === 'true'
+    );
+    if (hostSocket) {
+      hostSocket.emit('updateRadius', { ...d, clientId: socket.id });
+    }
+    socket.emit('updateRadius', { ...d, clientId: socket.id });
+  });
+
+  socket.on('updateElevation', d => {
+    const hostSocket = Array.from(io.sockets.sockets.values()).find(s => 
+      s.handshake.query.isHost === 'true'
+    );
+    if (hostSocket) {
+      hostSocket.emit('updateElevation', { ...d, clientId: socket.id });
+    }
+    socket.emit('updateElevation', { ...d, clientId: socket.id });
+  });
+
+  socket.on('updateBearing', d => {
+    const hostSocket = Array.from(io.sockets.sockets.values()).find(s => 
+      s.handshake.query.isHost === 'true'
+    );
+    if (hostSocket) {
+      hostSocket.emit('updateBearing', { ...d, clientId: socket.id });
+    }
+    socket.emit('updateBearing', { ...d, clientId: socket.id });
+  });
+
   socket.on('userDotPlaced', d => {
     const clientInfo = clients.get(socket.id);
-    socket.broadcast.emit('userDotPlaced', { ...d, clientId: socket.id, clientName: clientInfo?.name });
+    // Send only to host
+    const hostSocket = Array.from(io.sockets.sockets.values()).find(s => 
+      s.handshake.query.isHost === 'true'
+    );
+    if (hostSocket) {
+      hostSocket.emit('userDotPlaced', { 
+        ...d, 
+        clientId: socket.id, 
+        clientName: clientInfo?.name,
+        userDotColor: clientInfo?.userDotColor 
+      });
+    }
   });
 
   socket.on('disconnect', () => {

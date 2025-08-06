@@ -1,4 +1,26 @@
 // map.js
+// Helper function to convert hex color to hue rotation
+function getHueRotation(hexColor) {
+  // Convert hex to RGB
+  const r = parseInt(hexColor.substring(1,3), 16) / 255;
+  const g = parseInt(hexColor.substring(3,5), 16) / 255;
+  const b = parseInt(hexColor.substring(5,7), 16) / 255;
+  
+  // Get HSL
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0;
+  
+  if (max === min) h = 0;
+  else if (max === r) h = 60 * ((g - b) / (max - min));
+  else if (max === g) h = 60 * (2 + (b - r) / (max - min));
+  else h = 60 * (4 + (r - g) / (max - min));
+  
+  if (h < 0) h += 360;
+  
+  // Default marker is blue (240 degrees), so subtract that
+  return h - 240;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   // UI refs
   const modal       = document.getElementById('connection-modal');
@@ -28,6 +50,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let userMarker = null, userSidebar = null;
   const pins = {};   // id -> { marker, radiusCircle, elevation, bearing }
   const lines = {};  // id -> polyline
+  const userDots = {}; // clientName -> dot marker (host only)
 
   // Session control
   let isHost = false;
@@ -64,7 +87,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Server panel controls
   serverBtn.addEventListener('click', () => {
-    serverPanel.classList.add('open');
+    serverPanel.classList.toggle('open');
   });
 
   document.addEventListener('click', e => {
@@ -93,13 +116,25 @@ document.addEventListener('DOMContentLoaded', () => {
     // Hide all pins first
     Object.entries(pins).forEach(([id, p]) => {
       if (id.split('_')[0] !== clientId) {
-        p.marker.setOpacity(0.2);
-        if (p.radiusCircle) p.radiusCircle.setStyle({ opacity: 0.2, fillOpacity: 0.1 });
+        // Completely hide other clients' pins
+        p.marker.setOpacity(0);
+        if (p.radiusCircle) p.radiusCircle.setStyle({ opacity: 0, fillOpacity: 0 });
       } else {
         p.marker.setOpacity(1);
         if (p.radiusCircle) p.radiusCircle.setStyle({ opacity: 1, fillOpacity: 0.3 });
       }
     });
+    
+    // Hide other clients' user dots
+    Object.entries(userDots).forEach(([name, dot]) => {
+      const dotClientId = dot.clientId;
+      if (dotClientId !== clientId) {
+        dot.setOpacity(0);
+      } else {
+        dot.setOpacity(1);
+      }
+    });
+    
     updateLines();
   }
 
@@ -151,7 +186,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     setTimeout(()=>map.invalidateSize(),200);
 
-    socket = io(serverUrl);
+    socket = io(serverUrl, {
+      query: { isHost }
+    });
     socket.on('connect', ()=>showStatus('Connected!'));
     
     socket.on('clientsUpdated', clients => {
@@ -222,10 +259,17 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // --- Pin logic ---
-  function addPin(id, lat, lon, clientName, clientId) {
+  function addPin(id, lat, lon, clientName, clientId, pinColor) {
     if (pins[id]) return;
     
+    // Set custom icon path for all markers
+    L.Icon.Default.prototype.options.imagePath = 'public/images/';
+    
     const marker = L.marker([lat,lon]).addTo(map);
+    // Apply pin color by tinting the icon
+    if (pinColor) {
+      marker.getElement().style.filter = `hue-rotate(${getHueRotation(pinColor)}deg)`;
+    }
     let radiusCircle = null;
     
     pins[id] = { 
@@ -234,7 +278,8 @@ document.addEventListener('DOMContentLoaded', () => {
       elevation: 0, 
       bearing: 0,
       clientId,
-      clientName 
+      clientName,
+      pinColor 
     };
     
     marker.on('click',()=>showRadiusPopup(id));
@@ -385,27 +430,85 @@ document.addEventListener('DOMContentLoaded', () => {
       map.removeLayer(lines[id]);
       delete lines[id];
     }
-    if (!userMarker) return;
-    const u = userMarker.getLatLng();
-    for (const id in pins) {
-      const p = pins[id].marker.getLatLng();
-      const poly = L.polyline([u,p],{color:'red'}).addTo(map);
-      const dist = (u.distanceTo(p)/1000).toFixed(2)+' km';
-      poly.bindTooltip(dist,{sticky:true});
-      poly.on('mouseover',()=>poly.openTooltip());
-      poly.on('mouseout', ()=>poly.closeTooltip());
-      lines[id]=poly;
+
+    if (isHost) {
+      // In host mode, connect each user dot to their pins
+      Object.entries(userDots).forEach(([clientName, dot]) => {
+        if (!dot.getLatLng()) return;
+        
+        const dotClientId = dot.clientId;
+        // Skip if we're filtering and this isn't the selected client
+        if (selectedClientId && dotClientId !== selectedClientId) return;
+        
+        Object.entries(pins).forEach(([pinId, pin]) => {
+          if (pinId.split('_')[0] === dotClientId) {
+            const poly = L.polyline([dot.getLatLng(), pin.marker.getLatLng()], {
+              color: pin.pinColor || 'red',
+              opacity: pin.marker.options.opacity // Match pin visibility
+            }).addTo(map);
+            
+            const dist = (dot.getLatLng().distanceTo(pin.marker.getLatLng())/1000).toFixed(2)+' km';
+            poly.bindTooltip(dist, {sticky: true});
+            poly.on('mouseover', () => poly.openTooltip());
+            poly.on('mouseout', () => poly.closeTooltip());
+            lines[pinId] = poly;
+          }
+        });
+      });
+    } else {
+      // In client mode, only connect own user dot to own pins
+      if (!userMarker) return;
+      const u = userMarker.getLatLng();
+      Object.entries(pins).forEach(([id, pin]) => {
+        if (id.split('_')[0] === socket.id) {
+          const poly = L.polyline([u, pin.marker.getLatLng()], {
+            color: pin.pinColor || 'red'
+          }).addTo(map);
+          
+          const dist = (u.distanceTo(pin.marker.getLatLng())/1000).toFixed(2)+' km';
+          poly.bindTooltip(dist, {sticky: true});
+          poly.on('mouseover', () => poly.openTooltip());
+          poly.on('mouseout', () => poly.closeTooltip());
+          lines[id] = poly;
+        }
+      });
     }
   }
 
   // --- User dot ---
   function placeUserDot(latlng, renderOnly, clientName, userDotColor = null) {
-    if (userMarker) { map.removeLayer(userMarker); userMarker=null; }
-    if (userSidebar){ userSidebar.remove(); userSidebar=null; }
-    userMarker = L.circleMarker(latlng,{
-      radius:8, color:'white', weight:3,
-      fillColor:'blue', fillOpacity:1, interactive:true
+    if (!isHost && userMarker) {
+      map.removeLayer(userMarker);
+      userMarker = null;
+      if (userSidebar) {
+        userSidebar.remove();
+        userSidebar = null;
+      }
+    }
+
+    const dotColor = userDotColor || '#2196F3';
+    const dot = L.circleMarker(latlng, {
+      radius: 8,
+      color: 'white',
+      weight: 3,
+      fillColor: dotColor,
+      fillOpacity: 1,
+      interactive: true
     }).addTo(map);
+
+    if (isHost) {
+      dot.bindTooltip(clientName, {
+        permanent: false,
+        direction: 'top',
+        className: 'user-dot-tooltip'
+      });
+    }
+
+    if (!isHost) {
+      userMarker = dot;
+    } else {
+      userDots[clientName] = dot;
+    }
     userMarker.on('click',()=>{
       const c=`Lat:${latlng.lat.toFixed(4)}<br>Lon:${latlng.lng.toFixed(4)}`;
       userMarker.bindPopup(c).openPopup();
