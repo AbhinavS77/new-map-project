@@ -240,7 +240,36 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     
     socket.on('userDotPlaced', d => { 
-      if (!selectedClientId || selectedClientId === d.clientId) {
+      if (isHost) {
+        // For host: maintain separate dots for each client
+        if (userDots[d.clientId]) {
+          map.removeLayer(userDots[d.clientId]);
+        }
+        const dot = L.circleMarker(L.latLng(d.lat, d.lon), {
+          radius: 8,
+          color: 'white',
+          weight: 3,
+          fillColor: d.userDotColor || '#2196F3',
+          fillOpacity: 1,
+          interactive: true
+        }).addTo(map);
+        
+        dot.clientId = d.clientId;
+        dot.bindTooltip(d.clientName, {
+          permanent: false,
+          direction: 'top',
+          className: 'user-dot-tooltip'
+        });
+        
+        userDots[d.clientId] = dot;
+        
+        // Update visibility based on selected client
+        if (selectedClientId && selectedClientId !== d.clientId) {
+          dot.setOpacity(0);
+        }
+        updateLines();
+      } else if (!selectedClientId || selectedClientId === d.clientId) {
+        // For clients: only show their own dot
         placeUserDot(L.latLng(d.lat, d.lon), false, d.clientName, d.userDotColor);
       }
     });
@@ -304,10 +333,16 @@ document.addEventListener('DOMContentLoaded', () => {
       if(isNaN(km)||km<=0)return alert('Enter valid kilometers');
       const m=km*1000;
       if(pins[id].radiusCircle) map.removeLayer(pins[id].radiusCircle);
+      const pinColor = pins[id].pinColor || 'red';
       pins[id].radiusCircle = L.circle(marker.getLatLng(),{
-        radius:m, color:'red', fillColor:'red', fillOpacity:0.3, interactive:false
+        radius:m, 
+        color: pinColor,
+        fillColor: pinColor,
+        fillOpacity:0.3, 
+        interactive:false,
+        opacity: pins[id].marker.options.opacity || 1
       }).addTo(map);
-      socket.emit('updateRadius',{id, radius:m});
+      socket.emit('updateRadius',{id, radius:m, color: pinColor});
       renderSidebarEntry(id);
       marker.closePopup();
       updateLines();
@@ -315,12 +350,18 @@ document.addEventListener('DOMContentLoaded', () => {
     marker.bindPopup(ui).openPopup();
   }
 
-  function applyRemoteRadius(id, radius) {
+  function applyRemoteRadius(id, radius, color) {
     const p = pins[id];
     if (!p) return;
     if (p.radiusCircle) map.removeLayer(p.radiusCircle);
-    p.radiusCircle = L.circle(p.marker.getLatLng(),{
-      radius, color:'red', fillColor:'red', fillOpacity:0.3, interactive:false
+    const pinColor = color || p.pinColor || 'red';
+    p.radiusCircle = L.circle(p.marker.getLatLng(), {
+      radius,
+      color: pinColor,
+      fillColor: pinColor,
+      fillOpacity: 0.3,
+      interactive: false,
+      opacity: p.marker.options.opacity || 1
     }).addTo(map);
     renderSidebarEntry(id);
     updateLines();
@@ -425,7 +466,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // --- Lines ---
   function updateLines() {
-    // clear
+    // clear existing lines
     for (const id in lines) {
       map.removeLayer(lines[id]);
       delete lines[id];
@@ -456,16 +497,19 @@ document.addEventListener('DOMContentLoaded', () => {
         });
       });
     } else {
-      // In client mode, only connect own user dot to own pins
-      if (!userMarker) return;
-      const u = userMarker.getLatLng();
+      // In client mode, connect user dot to own pins
+      if (!userMarker || !userMarker.getLatLng()) return;
+      
+      const userLatLng = userMarker.getLatLng();
       Object.entries(pins).forEach(([id, pin]) => {
-        if (id.split('_')[0] === socket.id) {
-          const poly = L.polyline([u, pin.marker.getLatLng()], {
-            color: pin.pinColor || 'red'
+        // Check if this pin belongs to the current client
+        if (id.startsWith(socket.id)) {
+          const poly = L.polyline([userLatLng, pin.marker.getLatLng()], {
+            color: pin.pinColor || 'red',
+            opacity: pin.marker.options.opacity || 1
           }).addTo(map);
           
-          const dist = (u.distanceTo(pin.marker.getLatLng())/1000).toFixed(2)+' km';
+          const dist = (userLatLng.distanceTo(pin.marker.getLatLng())/1000).toFixed(2)+' km';
           poly.bindTooltip(dist, {sticky: true});
           poly.on('mouseover', () => poly.openTooltip());
           poly.on('mouseout', () => poly.closeTooltip());
@@ -475,7 +519,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // --- User dot ---
+    // --- User dot ---
   function placeUserDot(latlng, renderOnly, clientName, userDotColor = null) {
     if (!isHost && userMarker) {
       map.removeLayer(userMarker);
@@ -493,10 +537,9 @@ document.addEventListener('DOMContentLoaded', () => {
       weight: 3,
       fillColor: dotColor,
       fillOpacity: 1,
-      interactive: true
-    }).addTo(map);
-
-    if (isHost) {
+      interactive: true,
+      clientId: socket.id // Store client ID with the dot
+    }).addTo(map);    if (isHost) {
       dot.bindTooltip(clientName, {
         permanent: false,
         direction: 'top',
