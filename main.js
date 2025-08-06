@@ -4,11 +4,28 @@ const child_process = require('child_process');
 let serverProcess = null;
 
 ipcMain.handle('start-host', () => {
-  if (serverProcess) return;
-  const serverPath = path.join(__dirname, 'server.js');
-  serverProcess = child_process.spawn('node', [serverPath], { cwd: __dirname });
-  serverProcess.stdout.on('data', data => console.log(`Server: ${data}`));
-  serverProcess.stderr.on('data', data => console.error(`Server Error: ${data}`));
+  if (serverProcess) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    const serverPath = path.join(__dirname, 'server.js');
+    serverProcess = child_process.spawn('node', [serverPath], { cwd: __dirname });
+
+    serverProcess.stdout.on('data', data => {
+      const msg = data.toString();
+      console.log(`Server: ${msg}`);
+      if (msg.includes('Server running at')) {
+        resolve();
+      }
+    });
+
+    serverProcess.stderr.on('data', data => {
+      console.error(`Server Error: ${data.toString()}`);
+    });
+
+    serverProcess.on('exit', () => {
+      serverProcess = null;
+    });
+  });
 });
 
 function createWindow() {
