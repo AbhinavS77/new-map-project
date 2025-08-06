@@ -5,6 +5,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const hostBtn     = document.getElementById('host-btn');
   const clientBtn   = document.getElementById('client-btn');
   const ipInput     = document.getElementById('ip-address-input');
+  const clientFields = document.getElementById('client-fields');
+  const clientNameInput = document.getElementById('client-name-input');
+  const pinColorInput = document.getElementById('pin-color-input');
+  const userDotColorInput = document.getElementById('user-dot-color-input');
+  const serverBtn = document.getElementById('server-btn');
+  const serverPanel = document.getElementById('server-panel');
+  const clientButtons = document.getElementById('client-buttons');
+  const allIndiaBtn = document.getElementById('all-india-btn');
   const userBtn     = document.getElementById('user-toggle-btn');
   const pinBtn      = document.getElementById('pin-toggle-btn');
   const clearBtn    = document.getElementById('clear-btn');
@@ -22,15 +30,78 @@ document.addEventListener('DOMContentLoaded', () => {
   const lines = {};  // id -> polyline
 
   // Session control
+  let isHost = false;
+  let selectedClientId = null;
+
   hostBtn.addEventListener('click', async () => {
     await window.electronAPI.startHost();
+    isHost = true;
     initApp('http://localhost:3000');
+    serverBtn.classList.add('visible');
   });
+
   clientBtn.addEventListener('click', () => {
+    clientFields.style.display = 'block';
+    hostBtn.style.display = 'none';
+    
+    if (!clientNameInput.value.trim()) {
+      return alert('Please enter your name');
+    }
+    
     const ip = ipInput.value.trim();
     if (!ip) return alert('Enter Host IP.');
+    
+    isHost = false;
     initApp(`http://${ip}:3000`);
+    
+    // Send client info to server
+    socket.emit('clientInfo', {
+      name: clientNameInput.value.trim(),
+      pinColor: pinColorInput.value,
+      userDotColor: userDotColorInput.value
+    });
   });
+
+  // Server panel controls
+  serverBtn.addEventListener('click', () => {
+    serverPanel.classList.add('open');
+  });
+
+  document.addEventListener('click', e => {
+    if (!serverPanel.contains(e.target) && e.target !== serverBtn) {
+      serverPanel.classList.remove('open');
+    }
+  });
+
+  allIndiaBtn.addEventListener('click', () => {
+    selectedClientId = null;
+    showAllClients();
+    serverPanel.classList.remove('open');
+  });
+
+  function showAllClients() {
+    // Show all pins and user dots
+    Object.values(pins).forEach(p => {
+      p.marker.setOpacity(1);
+      if (p.radiusCircle) p.radiusCircle.setStyle({ opacity: 1, fillOpacity: 0.3 });
+    });
+    updateLines();
+  }
+
+  function showClientData(clientId) {
+    selectedClientId = clientId;
+    // Hide all pins first
+    Object.entries(pins).forEach(([id, p]) => {
+      if (id.split('_')[0] !== clientId) {
+        p.marker.setOpacity(0.2);
+        if (p.radiusCircle) p.radiusCircle.setStyle({ opacity: 0.2, fillOpacity: 0.1 });
+      } else {
+        p.marker.setOpacity(1);
+        if (p.radiusCircle) p.radiusCircle.setStyle({ opacity: 1, fillOpacity: 0.3 });
+      }
+    });
+    updateLines();
+  }
 
   // Mode toggles
   userBtn.addEventListener('click', () => {
@@ -81,28 +152,98 @@ document.addEventListener('DOMContentLoaded', () => {
     setTimeout(()=>map.invalidateSize(),200);
 
     socket = io(serverUrl);
-    socket.on('connect',      ()=>showStatus('Connected!'));
-    socket.on('pinAdded',     d=>{ addPin(d.id,d.lat,d.lon); });
-    socket.on('pinRemoved',   id=>{ removePin(id); });
-    socket.on('pinsCleared',  ()=>{ clearAll(); });
-    socket.on('updateRadius', d=>{ applyRemoteRadius(d.id,d.radius); });
-    socket.on('updateElevation', d=>{ applyRemoteElevation(d.id,d.elevation); });
-    socket.on('updateBearing', d=>{ applyRemoteBearing(d.id,d.bearing); });
-    socket.on('userDotPlaced',d=>{ placeUserDot(L.latLng(d.lat,d.lon),false); });
-    socket.on('connect_error', e=>{
+    socket.on('connect', ()=>showStatus('Connected!'));
+    
+    socket.on('clientsUpdated', clients => {
+      if (isHost) {
+        // Update client buttons
+        clientButtons.innerHTML = '';
+        clients.forEach(([clientId, info]) => {
+          const btn = document.createElement('button');
+          btn.className = 'client-btn';
+          btn.textContent = info.name;
+          btn.onclick = () => {
+            showClientData(clientId);
+            serverPanel.classList.remove('open');
+          };
+          clientButtons.appendChild(btn);
+        });
+      }
+    });
+
+    socket.on('pinAdded', d => { 
+      const pinId = `${d.clientId}_${d.id}`;
+      addPin(pinId, d.lat, d.lon, d.clientName, d.clientId); 
+    });
+    
+    socket.on('pinRemoved', d => { 
+      const pinId = `${d.clientId}_${d.id}`;
+      removePin(pinId); 
+    });
+    
+    socket.on('pinsCleared', d => { 
+      if (!selectedClientId || selectedClientId === d.clientId) {
+        clearAll(d.clientId); 
+      }
+    });
+    
+    socket.on('updateRadius', d => { 
+      const pinId = `${d.clientId}_${d.id}`;
+      applyRemoteRadius(pinId, d.radius); 
+    });
+    
+    socket.on('updateElevation', d => { 
+      const pinId = `${d.clientId}_${d.id}`;
+      applyRemoteElevation(pinId, d.elevation); 
+    });
+    
+    socket.on('updateBearing', d => { 
+      const pinId = `${d.clientId}_${d.id}`;
+      applyRemoteBearing(pinId, d.bearing); 
+    });
+    
+    socket.on('userDotPlaced', d => { 
+      if (!selectedClientId || selectedClientId === d.clientId) {
+        placeUserDot(L.latLng(d.lat, d.lon), false, d.clientName, d.userDotColor);
+      }
+    });
+    
+    socket.on('clientDisconnected', clientId => {
+      if (selectedClientId === clientId) {
+        selectedClientId = null;
+        showAllClients();
+      }
+    });
+    
+    socket.on('connect_error', e => {
       alert('Connection failed: '+e.message);
       location.reload();
     });
   }
 
   // --- Pin logic ---
-  function addPin(id, lat, lon) {
+  function addPin(id, lat, lon, clientName, clientId) {
     if (pins[id]) return;
+    
     const marker = L.marker([lat,lon]).addTo(map);
     let radiusCircle = null;
-    pins[id] = { marker, radiusCircle, elevation: 0, bearing: 0 };
+    
+    pins[id] = { 
+      marker, 
+      radiusCircle, 
+      elevation: 0, 
+      bearing: 0,
+      clientId,
+      clientName 
+    };
+    
     marker.on('click',()=>showRadiusPopup(id));
     renderSidebarEntry(id);
+    
+    if (selectedClientId && clientId !== selectedClientId) {
+      marker.setOpacity(0.2);
+    }
+    
     updateLines();
   }
 
@@ -258,7 +399,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // --- User dot ---
-  function placeUserDot(latlng, renderOnly) {
+  function placeUserDot(latlng, renderOnly, clientName, userDotColor = null) {
     if (userMarker) { map.removeLayer(userMarker); userMarker=null; }
     if (userSidebar){ userSidebar.remove(); userSidebar=null; }
     userMarker = L.circleMarker(latlng,{

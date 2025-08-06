@@ -14,6 +14,73 @@
 
     .container { display: none; height: 100vh; overflow: hidden; }
     .container.active { display: flex; }
+    
+    /* Server button (host-only) */
+    #server-btn {
+      position: fixed;
+      top: 20px;
+      left: 20px;
+      z-index: 1000;
+      padding: 10px 20px;
+      background: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      display: none;
+    }
+    #server-btn.visible { display: block; }
+    
+    /* Server panel */
+    #server-panel {
+      position: absolute;
+      left: -300px;
+      top: 0;
+      width: 300px;
+      height: 100%;
+      background: white;
+      z-index: 1001;
+      transition: left 0.3s ease-in-out;
+      box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+      padding: 20px;
+      overflow-y: auto;
+    }
+    
+    #server-panel.open { left: 0; }
+    
+    .client-btn {
+      display: block;
+      width: 100%;
+      padding: 10px;
+      margin: 5px 0;
+      border: none;
+      border-radius: 4px;
+      background: #f0f0f0;
+      cursor: pointer;
+      text-align: left;
+    }
+    
+    .client-btn:hover {
+      background: #e0e0e0;
+    }
+    
+    .client-btn.active {
+      background: #2196F3;
+      color: white;
+    }
+    
+    #all-india-btn {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      right: 20px;
+      padding: 10px;
+      background: #FF5722;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
 
     /* SIDEBAR */
     #sidebar {
@@ -137,14 +204,19 @@
     /* RIGHT PANEL OVERLAY */
     #right-panel {
       position: absolute;
-      top: 0; right: 0;
-      width: 0;
+      top: 0;
+      right: -300px;
+      width: 300px;
       height: 100%;
       background: #fff;
       box-shadow: -2px 0 8px rgba(0,0,0,0.2);
       overflow: auto;
-      transition: width 0.3s ease;
+      transition: right 0.3s ease-in-out;
       z-index: 500;
+    }
+    
+    #right-panel.open {
+      right: 0;
     }
 
     #panel-toggle-btn {
@@ -212,7 +284,20 @@
   <div id="connection-modal">
     <div class="modal-content">
       <h2>Start or Join a Session</h2>
-      <input id="ip-address-input" placeholder="Host IP (e.g. 192.168.x.x)" />
+      <div id="connection-fields">
+        <input id="ip-address-input" placeholder="Host IP (e.g. 192.168.x.x)" />
+        <div id="client-fields" style="display: none; margin-top: 15px;">
+          <input id="client-name-input" placeholder="Your Name" style="width: 100%; padding: 8px; margin-bottom: 10px;" />
+          <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+            <label>Pin Color:</label>
+            <input type="color" id="pin-color-input" value="#ff0000" />
+          </div>
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <label>User Dot Color:</label>
+            <input type="color" id="user-dot-color-input" value="#2196F3" />
+          </div>
+        </div>
+      </div>
       <div class="modal-buttons">
         <button id="host-btn">Host Session</button>
         <button id="client-btn">Join Session</button>
@@ -221,6 +306,14 @@
   </div>
 
   <div class="container" id="main-container">
+    <button id="server-btn">Server</button>
+    
+    <div id="server-panel">
+      <h3>Connected Clients</h3>
+      <div id="client-buttons"></div>
+      <button id="all-india-btn">All India</button>
+    </div>
+
     <div id="sidebar">
       <h2>Pinned Locations</h2>
       <ul id="pinned-locations"></ul>
