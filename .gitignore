@@ -1,0 +1,18 @@
+# Node.js
+node_modules/
+release-builds/
+India Tiles/
+
+# Logs
+*.log
+
+# Electron build folders
+dist/
+out/
+
+# Optional: OS-specific
+.DS_Store  # macOS
+Thumbs.db  # Windows
+
+# Optional: Environment config
+.env

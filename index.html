@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Collaborative LAN Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; font-family: 'Inter', sans-serif; background: #f0f2f5; }
+
+    .container { display: none; height: 100vh; overflow: hidden; }
+    .container.active { display: flex; }
+
+    /* SIDEBAR */
+    #sidebar {
+      position: relative;
+      background: #fff;
+      box-shadow: 2px 0 8px rgba(0,0,0,0.1);
+      padding: 20px;
+      overflow: auto;
+      resize: horizontal;
+      min-width: 150px;
+      max-width: 500px;
+      width: 300px;
+    }
+
+    #sidebar h2 {
+      font-size: 1.25rem;
+      margin-bottom: 10px;
+    }
+
+    #pinned-locations li {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      padding: 10px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .delete-btn {
+      background: #ff6b6b;
+      border: none;
+      color: #fff;
+      border-radius: 4px;
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+    .delete-btn:hover { background: #ff4c4c; }
+
+    /* OUTSIDE SIDEBAR BUTTONS */
+    #floating-buttons {
+      position: absolute;
+      top: auto;
+      bottom: 20px;
+      left: calc(300px + 20px); /* stick outside the default 300px sidebar */
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 999;
+      transition: left 0.2s;
+    }
+
+    #floating-buttons button {
+      width: 100px;
+      padding: 6px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      white-space: nowrap;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+    }
+
+    #pin-toggle-btn {
+      background: #2e86de;
+      color: #fff;
+    }
+    #pin-toggle-btn.active {
+      background: #1b4f72;
+    }
+    #clear-btn {
+      background: #e74c3c;
+      color: #fff;
+    }
+    #clear-btn:hover { background: #c0392b; }
+
+    /* MAP AREA */
+    #map-container {
+      flex: 1;
+      position: relative;
+    }
+    #map { width: 100%; height: 100%; }
+
+    /* RIGHT PANEL OVERLAY */
+    #right-panel {
+      position: absolute;
+      top: 0; right: 0;
+      width: 0;
+      height: 100%;
+      background: #fff;
+      box-shadow: -2px 0 8px rgba(0,0,0,0.2);
+      overflow: auto;
+      transition: width 0.3s ease;
+      z-index: 500;
+    }
+
+    #right-panel.open {
+      width: 300px;
+    }
+
+    #panel-toggle-btn {
+      position: absolute;
+      top: 50%; right: 0;
+      transform: translate(50%, -50%);
+      background: #2e86de;
+      color: #fff;
+      border: none;
+      padding: 8px;
+      border-radius: 4px 0 0 4px;
+      cursor: pointer;
+      z-index: 600;
+      transition: transform 0.3s;
+    }
+
+    #panel-toggle-btn.open {
+      transform: translate(50%, -50%) rotate(180deg);
+    }
+
+    /* MODAL */
+    #connection-modal {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.4);
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    .modal-content {
+      background: #fff;
+      padding: 30px;
+      border-radius: 8px;
+      width: 320px;
+      text-align: center;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+
+    .modal-buttons {
+      display: flex; gap: 10px; margin-top: 15px;
+    }
+
+    .modal-buttons button {
+      flex: 1; padding: 8px; border: none; border-radius: 4px;
+      cursor: pointer;
+    }
+
+    #host-btn { background: #28a745; color: #fff; }
+    #client-btn { background: #007bff; color: #fff; }
+
+    /* STATUS POPUP */
+    #status-popup {
+      position: fixed;
+      bottom: -80px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #333;
+      color: #fff;
+      padding: 10px 20px;
+      border-radius: 20px;
+      transition: bottom 0.4s ease-in-out;
+    }
+  </style>
+</head>
+<body>
+  <!-- Connection Modal -->
+  <div id="connection-modal">
+    <div class="modal-content">
+      <h2>Start or Join a Session</h2>
+      <input id="ip-address-input" placeholder="Host IP (e.g. 192.168.x.x)" />
+      <div class="modal-buttons">
+        <button id="host-btn">Host Session</button>
+        <button id="client-btn">Join Session</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main App -->
+  <div class="container" id="main-container">
+    <!-- Sidebar -->
+    <div id="sidebar">
+      <h2>Pinned Locations</h2>
+      <ul id="pinned-locations"></ul>
+    </div>
+
+    <!-- Floating buttons beside sidebar -->
+    <div id="floating-buttons">
+      <button id="pin-toggle-btn">Pin Mode OFF</button>
+      <button id="clear-btn">Clear All</button>
+    </div>
+
+    <!-- Map Container -->
+    <div id="map-container">
+      <div id="map"></div>
+      <button id="panel-toggle-btn">▶️</button>
+      <div id="right-panel"></div>
+    </div>
+  </div>
+
+  <!-- Status Popup -->
+  <div id="status-popup"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <script src="map.js"></script>
+</body>
+</html>
