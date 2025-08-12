@@ -1,344 +1,77 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Collaborative LAN Map</title>
   <link rel="stylesheet" href="public/css/leaflet.css" />
   <style>
-    /* User dot tooltip styling */
-    .user-dot-tooltip {
-      background: #333;
-      color: white;
-      border: none;
-      border-radius: 4px;
-      padding: 4px 8px;
-      font-size: 12px;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; font-family: 'Inter', sans-serif; background: #f0f2f5; }
-
-    .container { display: none; height: 100vh; overflow: hidden; }
-    .container.active { display: flex; }
-    
-    /* Server button (host-only) */
-    #server-btn {
-      position: fixed;
-      top: 20px;
-      left: 20px;
-      z-index: 2000;
-      padding: 10px 20px;
-      background: #4CAF50;
-      color: white;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      display: none;
-    }
-    #server-btn.visible { display: block; }
-    
-    /* Server panel */
-    #server-panel {
-      position: absolute;
-      left: -300px;
-      top: 0;
-      width: 300px;
-      height: 100%;
-      background: white;
-      z-index: 1001;
-      transition: left 0.3s ease-in-out;
-      box-shadow: 2px 0 5px rgba(0,0,0,0.1);
-      padding: 20px;
-      overflow-y: auto;
-    }
-    
-    #server-panel.open { left: 0; }
-    
-    .client-btn {
-      display: block;
-      width: 100%;
-      padding: 10px;
-      margin: 5px 0;
-      border: none;
-      border-radius: 4px;
-      background: #f0f0f0;
-      cursor: pointer;
-      text-align: left;
-    }
-    
-    .client-btn:hover {
-      background: #e0e0e0;
-    }
-    
-    .client-btn.active {
-      background: #2196F3;
-      color: white;
-    }
-    
-    #all-india-btn {
-      position: absolute;
-      bottom: 20px;
-      left: 20px;
-      right: 20px;
-      padding: 10px;
-      background: #FF5722;
-      color: white;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-    }
-
-    /* SIDEBAR */
-    #sidebar {
-      position: relative;
-      background: #fff;
-      box-shadow: 2px 0 8px rgba(0,0,0,0.1);
-      padding: 20px;
-      overflow: auto;
-      resize: horizontal;
-      min-width: 150px;
-      max-width: 500px;
-      width: 300px;
-    }
-
-    #sidebar h2 {
-      font-size: 1.25rem;
-      margin-bottom: 10px;
-    }
-
-    #pinned-locations li {
-      background: #fff;
-      border: 1px solid #ddd;
-      border-radius: 6px;
-      padding: 10px;
-      margin-bottom: 8px;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-    #pinned-locations li.user-dot {
-      background: #add8e6;
-    }
-
-    /* Arrange top row (lat/lon + delete) */
-    #pinned-locations li > .top-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .pin-data {
-      font-size: 0.9rem;
-      display: flex;
-      align-items: center;
-      gap: 4px;
-    }
-    .pin-data label {
-      margin-right: 4px;
-    }
-    .pin-data input {
-      width: 60px;
-      padding: 2px 4px;
-      font-size: 0.9rem;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-    }
-
-    .delete-btn {
-      background: #ff6b6b;
-      border: none;
-      color: #fff;
-      border-radius: 4px;
-      padding: 4px 8px;
-      cursor: pointer;
-    }
-    .delete-btn:hover { background: #ff4c4c; }
-
-    /* OUTSIDE SIDEBAR BUTTONS */
-    #floating-buttons {
-      position: absolute;
-      bottom: 20px;
-      left: calc(300px + 20px);
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      z-index: 999;
-      transition: left 0.2s;
-    }
-
-    #floating-buttons button {
-      width: 140px;
-      padding: 6px;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 0.9rem;
-      white-space: nowrap;
-      box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-    }
-
-    #user-toggle-btn {
-      background: #fff;
-      color: #333;
-      border: 1px solid #ddd;
-    }
-    #user-toggle-btn.active {
-      background: #e0e0e0;
-    }
-
-    #pin-toggle-btn {
-      background: #2e86de;
-      color: #fff;
-    }
-    #pin-toggle-btn.active {
-      background: #1b4f72;
-    }
-
-    #clear-btn {
-      background: #e74c3c;
-      color: #fff;
-    }
-    #clear-btn:hover { background: #c0392b; }
-
-    /* MAP AREA */
-    #map-container {
-      flex: 1;
-      position: relative;
-    }
-    #map { width: 100%; height: 100%; }
-
-    /* RIGHT PANEL OVERLAY */
-    #right-panel {
-      position: absolute;
-      top: 0;
-      right: -300px;
-      width: 300px;
-      height: 100%;
-      background: #fff;
-      box-shadow: -2px 0 8px rgba(0,0,0,0.2);
-      overflow: auto;
-      transition: right 0.3s ease-in-out;
-      z-index: 500;
-    }
-    
-    #right-panel.open {
-      right: 0;
-    }
-
-    #panel-toggle-btn {
-      position: absolute;
-      top: 50%; right: 0;
-      transform: translate(50%, -50%);
-      background: #2e86de;
-      color: #fff;
-      border: none;
-      padding: 8px;
-      border-radius: 4px 0 0 4px;
-      cursor: pointer;
-      z-index: 600;
-      transition: transform 0.3s;
-    }
-
-    #panel-toggle-btn.open {
-      transform: translate(50%, -50%) rotate(180deg);
-    }
-
-    /* MODAL */
-    #connection-modal {
-      position: fixed; inset: 0;
-      background: rgba(0,0,0,0.4);
-      display: flex; align-items: center; justify-content: center;
-    }
-
-    .modal-content {
-      background: #fff;
-      padding: 30px;
-      border-radius: 8px;
-      width: 320px;
-      text-align: center;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-    }
-
-    .modal-buttons {
-      display: flex; gap: 10px; margin-top: 15px;
-    }
-
-    .modal-buttons button {
-      flex: 1; padding: 8px; border: none; border-radius: 4px;
-      cursor: pointer;
-    }
-
-    #host-btn { background: #28a745; color: #fff; }
-    #client-btn { background: #007bff; color: #fff; }
-
-    /* STATUS POPUP */
-    #status-popup {
-      position: fixed;
-      bottom: -80px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: #333;
-      color: #fff;
-      padding: 10px 20px;
-      border-radius: 20px;
-      transition: bottom 0.4s ease-in-out;
-    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    html,body{height:100%;font-family:Inter,system-ui,Arial;background:#f5f7fb;color:#111}
+    #map { width:100%; height:100%; }
+    .container { display:flex; height:100vh; overflow:hidden; }
+    #sidebar { width:300px; background:#fff; padding:16px; box-shadow:2px 0 14px rgba(20,30,40,0.04); overflow:auto; }
+    #map-container { flex:1; position:relative; }
+    .btn{cursor:pointer;border:none;padding:8px 10px;border-radius:8px}
+    #connection-modal{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.28);z-index:3000}
+    .modal {background:#fff;padding:18px;border-radius:10px;width:420px;box-shadow:0 10px 40px rgba(0,0,0,0.08)}
+    #server-panel{position:absolute;left:18px;top:64px;width:320px;background:#fff;padding:10px;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.06);display:none;z-index:1100}
+    #server-btn{position:absolute;left:18px;top:18px;display:none;padding:8px;background:#fff;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,0.06);z-index:1100}
+    #floating-buttons{position:absolute;right:18px;top:18px;display:flex;flex-direction:column;gap:8px;z-index:1000}
+    #status-popup{position:fixed;left:50%;transform:translateX(-50%);bottom:20px;background:#111;color:#fff;padding:8px 12px;border-radius:18px;opacity:0;transition:opacity .2s}
+    #status-popup.show{opacity:1}
+    #pinned-locations{list-style:none;padding:0;display:flex;flex-direction:column;gap:8px}
+    #pinned-locations li{background:#fcfcff;padding:10px;border-radius:8px;border:1px solid #eef2f7}
   </style>
 </head>
 <body>
-
   <div id="connection-modal">
-    <div class="modal-content">
-      <h2>Start or Join a Session</h2>
-      <div id="connection-fields">
-        <input id="ip-address-input" placeholder="Host IP (e.g. 192.168.x.x)" />
-        <div id="client-fields" style="display: none; margin-top: 15px;">
-          <input id="client-name-input" placeholder="Your Name" style="width: 100%; padding: 8px; margin-bottom: 10px;" />
-          <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
-            <label>Pin Color:</label>
-            <input type="color" id="pin-color-input" value="#ff0000" />
-          </div>
-          <div style="display: flex; align-items: center; gap: 10px;">
-            <label>User Dot Color:</label>
-            <input type="color" id="user-dot-color-input" value="#2196F3" />
-          </div>
-        </div>
+    <div class="modal">
+      <h3>Start or Join a Session</h3>
+      <div style="margin-top:10px;color:#475569">If exactly one host is on your LAN, the app will auto-connect. Otherwise enter Host IP or start hosting.</div>
+
+      <div style="margin-top:12px;">
+        <input id="ip-address-input" placeholder="Host IP (leave blank for discovery)" style="width:100%;padding:8px;border-radius:8px;border:1px solid #e6e9ef" />
       </div>
-      <div class="modal-buttons">
-        <button id="host-btn">Host Session</button>
-        <button id="client-btn">Join Session</button>
+
+      <div style="margin-top:8px;">
+        <input id="client-name-input" placeholder="Your Name (required to join)" style="width:100%;padding:8px;border-radius:8px;border:1px solid #e6e9ef" />
+      </div>
+
+      <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+        <label>Pin Color</label>
+        <input type="color" id="pin-color-input" value="#ff4d4f"/>
+        <label style="margin-left:8px">User Dot</label>
+        <input type="color" id="user-dot-color-input" value="#1e88e5"/>
+      </div>
+
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        <button id="host-btn" class="btn" style="background:#1e88e5;color:#fff">Host Session</button>
+        <button id="client-btn" class="btn" style="background:#10b981;color:#fff">Join Session</button>
       </div>
     </div>
   </div>
 
-  <div class="container" id="main-container">
-    <button id="server-btn">Server</button>
-    
-    <div id="server-panel">
-      <h3>Connected Clients</h3>
-      <div id="client-buttons"></div>
-      <button id="all-india-btn">All India</button>
-    </div>
-
+  <div class="container" id="main-container" style="display:none;">
     <div id="sidebar">
       <h2>Pinned Locations</h2>
       <ul id="pinned-locations"></ul>
     </div>
 
-    <div id="floating-buttons">
-      <button id="user-toggle-btn">User Mode OFF</button>
-      <button id="pin-toggle-btn">Pin Mode OFF</button>
-      <button id="clear-btn">Clear All</button>
-    </div>
-
     <div id="map-container">
       <div id="map"></div>
-      <button id="panel-toggle-btn">▶️</button>
-      <div id="right-panel"></div>
+
+      <div id="floating-buttons">
+        <button id="user-toggle-btn" class="btn">User Mode OFF</button>
+        <button id="pin-toggle-btn" class="btn">Pin Mode OFF</button>
+        <button id="clear-btn" class="btn" style="background:#ef4444;color:#fff">Clear All</button>
+      </div>
+
+      <button id="server-btn">Server</button>
+      <div id="server-panel"></div>
+      <div id="status-popup"></div>
     </div>
   </div>
-
-  <div id="status-popup"></div>
 
   <script src="public/js/leaflet.js"></script>
   <script src="public/js/socket.io.min.js"></script>
