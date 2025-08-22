@@ -1,4 +1,6 @@
-// map.js (updated: pin anchor adjusted with bottom padding to fix offset)
+// map.js (complete) - includes host-only shapes (box/cone/circle), outlines, and owner-aware updates
+
+// --- Helpers: marker SVG, shape icons, geodesic math --- //
 function createSvgIconDataUrl(hexColor='#ff4d4f', size=[24,38]) {
   const w = size[0], h = size[1];
   const svg = `
@@ -16,17 +18,11 @@ function createSvgIconDataUrl(hexColor='#ff4d4f', size=[24,38]) {
   return 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg);
 }
 
-// Build marker icon with extra bottom padding so the visible tip aligns with click point.
-// Adjust ICON_BOTTOM_PADDING to fine-tune vertical alignment (pixels).
 function buildMarkerIcon(pinColor) {
   const ICON_SIZE = [30, 45];
-  const ICON_BOTTOM_PADDING = -20; // <--- increase to push icon further down, decrease to pull up
+  const ICON_BOTTOM_PADDING = -24; // tuned to align tip with click point
   const svgUrl = createSvgIconDataUrl(pinColor);
-
-  // iconAnchor Y is icon height + bottom padding so the anchor point is below the visible SVG,
-  // causing the tip to land exactly at the clicked lat/lng pixel.
   const anchorY = ICON_SIZE[1] + ICON_BOTTOM_PADDING;
-
   return L.icon({
     iconUrl: svgUrl,
     iconSize: ICON_SIZE,
@@ -35,6 +31,63 @@ function buildMarkerIcon(pinColor) {
   });
 }
 
+// Shape icon with outline/stroke for clarity
+function buildShapeDivIcon(type, color) {
+  const size = 22;
+  let shapeSvg = '';
+  const stroke = 'rgba(0,0,0,0.14)';
+  const strokeWidth = 1.6;
+
+  if (type === 'box') {
+    shapeSvg = `<rect x="3" y="3" width="16" height="16" rx="2" fill="${color}" stroke="${stroke}" stroke-width="${strokeWidth}"/>`;
+  } else if (type === 'circle') {
+    shapeSvg = `<circle cx="11" cy="11" r="8" fill="${color}" stroke="${stroke}" stroke-width="${strokeWidth}"/>`;
+  } else { // cone/triangle
+    shapeSvg = `<polygon points="11,3 19,19 3,19" fill="${color}" stroke="${stroke}" stroke-width="${strokeWidth}"/>`;
+  }
+
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${size}' height='${size}' viewBox='0 0 ${size} ${size}'>${shapeSvg}</svg>`;
+  return L.divIcon({
+    html: svg,
+    className: '',
+    iconSize: [size, size],
+    iconAnchor: [Math.floor(size/2), Math.floor(size/2)]
+  });
+}
+
+// geodesic destination using spherical Earth model
+function destinationPoint(lat, lon, bearingDeg, distanceMeters) {
+  const R = 6378137; // Earth radius in m
+  const bearing = bearingDeg * Math.PI / 180;
+  const lat1 = lat * Math.PI / 180;
+  const lon1 = lon * Math.PI / 180;
+  const dDivR = distanceMeters / R;
+
+  const lat2 = Math.asin(Math.sin(lat1) * Math.cos(dDivR) + Math.cos(lat1) * Math.sin(dDivR) * Math.cos(bearing));
+  const lon2 = lon1 + Math.atan2(Math.sin(bearing) * Math.sin(dDivR) * Math.cos(lat1), Math.cos(dDivR) - Math.sin(lat1) * Math.sin(lat2));
+
+  return [lat2 * 180 / Math.PI, lon2 * 180 / Math.PI];
+}
+
+// build cone polygon arc points (center + arc)
+function buildConePolygonPoints(centerLat, centerLon, radiusMeters, bearingDeg, spreadDeg, stepDeg=6) {
+  const start = bearingDeg - spreadDeg/2;
+  const end = bearingDeg + spreadDeg/2;
+  const pts = [];
+  for (let a = start; a <= end + 1e-6; a += stepDeg) {
+    pts.push(destinationPoint(centerLat, centerLon, a, radiusMeters));
+  }
+  return [ [centerLat, centerLon], ...pts ];
+}
+
+function randomPastel() {
+  const h = Math.floor(Math.random()*360);
+  const s = 60 + Math.floor(Math.random()*20);
+  const l = 70 + Math.floor(Math.random()*8);
+  return `hsl(${h} ${s}% ${l}%)`;
+}
+
+// --- DOM refs & state --- //
 document.addEventListener('DOMContentLoaded', async () => {
   // UI refs
   const modal = document.getElementById('connection-modal');
@@ -52,6 +105,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const container = document.getElementById('main-container');
   const statusBar = document.getElementById('status-popup');
   const sidebar = document.getElementById('pinned-locations');
+  const floating = document.getElementById('floating-buttons');
 
   // state
   let map = null, socket = null, serverUrl = null, isHost = false;
@@ -60,7 +114,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   const pins = {};    // key: `${clientId}_${origId}`
   const userDots = {}; // clientId -> circleMarker
   const lines = {};   // pinKey -> polyline
+  const shapes = {};  // shapeId -> { marker, overlay, meta }
   let selectedClientId = null;
+  let currentShapePlacement = null;
+
+  // UI: overlays container (host only)
+  const overlaysContainer = document.createElement('div');
+  overlaysContainer.id = 'overlays-container';
+  overlaysContainer.style.marginTop = '12px';
 
   container.style.display = 'none';
   modal.style.display = 'flex';
@@ -70,6 +131,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (hosts && hosts.length === 1) showStatus('Host found — enter name to join.');
   } catch(e){ console.warn(e); }
 
+  // --- Host start --- //
   hostBtn.addEventListener('click', async () => {
     await window.electronAPI.startHost();
     isHost = true; serverUrl = 'http://localhost:3000';
@@ -77,8 +139,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     modal.style.display = 'none'; container.style.display = 'flex';
     serverBtn.style.display = 'block'; serverPanel.style.display = 'block';
     showStatus('Hosting on this machine');
+    createHostShapeButtons();
   });
 
+  // --- Client join --- //
   clientBtn.addEventListener('click', async () => {
     const name = clientNameInput.value.trim();
     if (!name) return alert('Please enter your name (required).');
@@ -118,7 +182,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     pinBtn.textContent = `Pin Mode ${isPinMode? 'ON':'OFF'}`;
   });
 
-  // Clear: host clears all; client clears only itself
   clearBtn.addEventListener('click', () => {
     if (!socket) return;
     if (isHost) {
@@ -130,17 +193,26 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // init / socket / handlers
+  // --- init app and socket handlers --- //
   function initApp(url, hostFlag=false, clientName=null, colors=null) {
     serverUrl = url; isHost = hostFlag;
+
+    // add overlays header to sidebar
+    if (!sidebar.querySelector('#overlays-container')) {
+      overlaysContainer.innerHTML = `<h3 style="margin:6px 0 8px">Overlays</h3><div id="overlays-list"></div>`;
+      sidebar.insertBefore(overlaysContainer, sidebar.firstChild);
+    }
 
     if (!map) {
       map = L.map('map').setView([20.5937,78.9629], 5);
       const tileTemplate = `${serverUrl.replace(/\/$/,'')}/tiles/{z}/{x}/{y}.png`;
       L.tileLayer(tileTemplate, { minZoom:0, maxZoom:18, attribution:'© Local Tiles' }).addTo(map);
       map.on('click', e => {
-        if (isUserMode) placeUserDot(e.latlng, true);
-        else if (isPinMode) {
+        if (currentShapePlacement && isHost) {
+          openShapePopupAt(currentShapePlacement, e.latlng);
+        } else if (isUserMode) {
+          placeUserDot(e.latlng, true);
+        } else if (isPinMode) {
           const id = Date.now().toString();
           socket && socket.emit('newPin', { id, lat: e.latlng.lat, lon: e.latlng.lng });
         }
@@ -162,6 +234,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     });
 
+    // clients list for host
     socket.on('clientsUpdated', clientsArr => {
       if (!isHost) return;
       serverPanel.innerHTML = '<h4 style="margin:6px 0 10px">Connected Clients</h4>';
@@ -183,6 +256,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       serverPanel.appendChild(allBtn);
     });
 
+    // pins events
     socket.on('pinAdded', d => {
       const pinId = `${d.clientId}_${d.id}`;
       addPin(pinId, d.lat, d.lon, d.clientName, d.clientId, d.pinColor);
@@ -230,6 +304,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (!isHost) placeUserDot(L.latLng(d.lat, d.lon), false, d.clientName, d.userDotColor);
     });
 
+    // shapes sync
+    socket.on('shapesUpdated', sArr => { sArr.forEach(s => addShapeLocal(s, false)); });
+    socket.on('shapeAdded', s => addShapeLocal(s, false));
+    socket.on('shapeUpdated', s => addShapeLocal(s, true));
+    socket.on('shapeRemoved', id => removeShapeLocal(id, false));
+
     socket.on('clientDisconnected', clientId => {
       clearClientData(clientId);
       if (selectedClientId === clientId) { selectedClientId = null; showAllClients(); }
@@ -241,7 +321,178 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // addPin uses icon built with bottom padding anchor
+  // --- Host shape controls & placement --- //
+  function createHostShapeButtons() {
+    if (document.getElementById('host-shape-controls')) return;
+    const wrap = document.createElement('div');
+    wrap.id = 'host-shape-controls';
+    wrap.style.display = 'flex';
+    wrap.style.flexDirection = 'row';
+    wrap.style.gap = '8px';
+    wrap.style.alignItems = 'center';
+
+    const makeBtn = (label, type) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.className = 'btn';
+      b.style.padding = '8px 10px';
+      b.style.borderRadius = '10px';
+      b.onclick = () => {
+        currentShapePlacement = currentShapePlacement === type ? null : type;
+        Array.from(wrap.querySelectorAll('button')).forEach(x => x.style.background = '#fff');
+        if (currentShapePlacement === type) b.style.background = '#f1f5f9';
+      };
+      return b;
+    };
+
+    const boxBtn = makeBtn('▭ Box', 'box');
+    const coneBtn = makeBtn('▲ Cone', 'cone');
+    const circleBtn = makeBtn('○ Circle', 'circle');
+
+    wrap.appendChild(boxBtn);
+    wrap.appendChild(coneBtn);
+    wrap.appendChild(circleBtn);
+    floating.insertBefore(wrap, floating.firstChild);
+  }
+
+  function openShapePopupAt(type, latlng) {
+    const popup = L.popup({ closeOnClick: false, autoClose: false })
+      .setLatLng(latlng);
+
+    let html = `<div style="min-width:200px">`;
+    html += `<div style="font-weight:700;margin-bottom:6px">Add ${type}</div>`;
+    html += `<div style="margin-bottom:6px"><label>Radius (m):</label><br><input id="shape-radius" type="number" value="500" style="width:100%"/></div>`;
+    if (type === 'cone') {
+      html += `<div style="margin-bottom:6px"><label>Bearing ° (from north):</label><br><input id="shape-bearing" type="number" value="0" style="width:100%"/></div>`;
+      html += `<div style="margin-bottom:6px"><label>Spread °:</label><br><input id="shape-spread" type="number" value="60" style="width:100%"/></div>`;
+    }
+    html += `<div style="display:flex;gap:8px;justify-content:flex-end"><button id="shape-cancel" class="btn">Cancel</button><button id="shape-ok" class="btn" style="background:#1e88e5;color:#fff">Add</button></div>`;
+    html += `</div>`;
+    popup.setContent(html).openOn(map);
+
+    document.getElementById('shape-cancel').onclick = () => {
+      map.closePopup(popup);
+      currentShapePlacement = null;
+      const wrap = document.getElementById('host-shape-controls');
+      if (wrap) Array.from(wrap.querySelectorAll('button')).forEach(x => x.style.background = '#fff');
+    };
+
+    document.getElementById('shape-ok').onclick = () => {
+      const r = parseFloat(document.getElementById('shape-radius').value) || 0;
+      let bearing = 0, spread = 60;
+      if (type === 'cone') {
+        bearing = parseFloat(document.getElementById('shape-bearing').value) || 0;
+        spread = parseFloat(document.getElementById('shape-spread').value) || 60;
+      }
+      const id = `shape_${Date.now()}`;
+      const color = randomPastel();
+      const shapeObj = {
+        id, type,
+        lat: latlng.lat, lon: latlng.lng,
+        radius: r,
+        bearing: bearing,
+        spread: spread,
+        color,
+        createdAt: Date.now()
+      };
+      addShapeLocal(shapeObj, false);
+      socket && socket.emit('newShape', shapeObj);
+      map.closePopup(popup);
+      currentShapePlacement = null;
+      const wrap = document.getElementById('host-shape-controls');
+      if (wrap) Array.from(wrap.querySelectorAll('button')).forEach(x => x.style.background = '#fff');
+    };
+  }
+
+  function addShapeLocal(shape, isUpdate) {
+    if (!shape || !shape.id) return;
+    if (shapes[shape.id] && !isUpdate) return;
+    if (shapes[shape.id]) removeShapeLocal(shape.id, true);
+
+    const marker = L.marker([shape.lat, shape.lon], { icon: buildShapeDivIcon(shape.type, shape.color) }).addTo(map);
+
+    let overlay = null;
+    if (shape.type === 'box' || shape.type === 'circle') {
+      overlay = L.circle([shape.lat, shape.lon], { radius: shape.radius || 0, color: shape.color, fillColor: shape.color, fillOpacity: 0.22, weight:2 }).addTo(map);
+    } else if (shape.type === 'cone') {
+      const polygonPoints = buildConePolygonPoints(shape.lat, shape.lon, shape.radius || 0, shape.bearing || 0, shape.spread || 60, 6);
+      const arc = polygonPoints.slice(1);
+      overlay = L.polygon([ [shape.lat, shape.lon], ...arc ], { color: shape.color, fillColor: shape.color, fillOpacity: 0.22, weight:2 }).addTo(map);
+    }
+
+    if (isHost) {
+      marker.on('click', () => openHostEditShapePopup(shape));
+      overlay && overlay.on('click', () => openHostEditShapePopup(shape));
+    }
+
+    shapes[shape.id] = { marker, overlay, meta: shape };
+    renderShapesList();
+  }
+
+  function removeShapeLocal(shapeId, silent) {
+    const s = shapes[shapeId];
+    if (!s) return;
+    if (s.marker) try { map.removeLayer(s.marker); } catch(e){}
+    if (s.overlay) try { map.removeLayer(s.overlay); } catch(e){}
+    delete shapes[shapeId];
+    renderShapesList();
+  }
+
+  function openHostEditShapePopup(shapeMeta) {
+    if (!isHost) return;
+    const latlng = [shapeMeta.lat, shapeMeta.lon];
+    const popup = L.popup({ closeOnClick:false, autoClose:false }).setLatLng(latlng);
+    let html = `<div style="min-width:230px"><div style="font-weight:700;margin-bottom:6px">Edit ${shapeMeta.type}</div>`;
+    html += `<div style="margin-bottom:6px"><label>Radius (m):</label><br><input id="edit-radius" type="number" value="${shapeMeta.radius||0}" style="width:100%"/></div>`;
+    if (shapeMeta.type === 'cone') {
+      html += `<div style="margin-bottom:6px"><label>Bearing °:</label><br><input id="edit-bearing" type="number" value="${shapeMeta.bearing||0}" style="width:100%"/></div>`;
+      html += `<div style="margin-bottom:6px"><label>Spread °:</label><br><input id="edit-spread" type="number" value="${shapeMeta.spread||60}" style="width:100%"/></div>`;
+    }
+    html += `<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button id="shape-del" class="btn" style="background:#ef4444;color:#fff">Delete</button><button id="shape-save" class="btn" style="background:#1e88e5;color:#fff">Save</button></div></div>`;
+    popup.setContent(html).openOn(map);
+
+    document.getElementById('shape-del').onclick = () => {
+      map.closePopup(popup);
+      socket && socket.emit('removeShape', shapeMeta.id);
+      removeShapeLocal(shapeMeta.id, false);
+    };
+
+    document.getElementById('shape-save').onclick = () => {
+      const newR = parseFloat(document.getElementById('edit-radius').value) || 0;
+      let newB = shapeMeta.bearing || 0, newS = shapeMeta.spread || 60;
+      if (shapeMeta.type === 'cone') {
+        newB = parseFloat(document.getElementById('edit-bearing').value) || 0;
+        newS = parseFloat(document.getElementById('edit-spread').value) || 60;
+      }
+      const updated = Object.assign({}, shapeMeta, { radius: newR, bearing: newB, spread: newS });
+      addShapeLocal(updated, true);
+      socket && socket.emit('updateShape', updated);
+      map.closePopup(popup);
+    };
+  }
+
+  function renderShapesList() {
+    const root = document.getElementById('overlays-list');
+    if (!root) return;
+    root.innerHTML = '';
+    Object.values(shapes).forEach(sobj => {
+      const meta = sobj.meta;
+      const div = document.createElement('div');
+      div.style.display='flex'; div.style.justifyContent='space-between'; div.style.alignItems='center';
+      div.style.padding='8px'; div.style.marginBottom='8px'; div.style.border='1px solid #eef2f7'; div.style.borderRadius='8px';
+      div.innerHTML = `<div><div style="font-weight:700">${meta.type.toUpperCase()}</div><div style="font-size:12px;color:#6b7280">Lat:${meta.lat.toFixed(4)}, Lon:${meta.lon.toFixed(4)}</div></div>`;
+      const btns = document.createElement('div');
+      const showBtn = document.createElement('button'); showBtn.textContent='Show'; showBtn.className='btn';
+      showBtn.onclick = () => { map.setView([meta.lat, meta.lon], Math.max(map.getZoom(), 12)); showClientData(meta.clientId || null); };
+      const editBtn = document.createElement('button'); editBtn.textContent='Edit'; editBtn.className='btn';
+      editBtn.onclick = () => openHostEditShapePopup(meta);
+      btns.appendChild(showBtn); btns.appendChild(editBtn);
+      div.appendChild(btns);
+      root.appendChild(div);
+    });
+  }
+
+  // --- Pins --- //
   function addPin(id, lat, lon, clientName, clientId, pinColor) {
     if (pins[id]) return;
     const icon = buildMarkerIcon(pinColor || '#ff4d4f');
@@ -254,8 +505,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateLines();
   }
 
+  // show radius popup (host edits include ownerClientId)
   function showRadiusPopup(id) {
-    const p = pins[id]; if (!p) return;
+    const p = pins[id];
+    if (!p) return;
     p.marker.closePopup(); p.marker.unbindPopup();
     const ui = L.DomUtil.create('div','pin-popup');
     ui.innerHTML = `<input type="number" placeholder="Distance in km" style="width:120px;margin-bottom:6px"/><br/><button>OK</button>`;
@@ -264,8 +517,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       const km = parseFloat(inp.value); if (isNaN(km) || km<=0) return alert('Enter valid kilometers');
       const m = km*1000; if (p.radiusCircle) map.removeLayer(p.radiusCircle);
       p.radiusCircle = L.circle(p.marker.getLatLng(), { radius:m, color:p.pinColor||'#ff4d4f', fillColor:p.pinColor||'#ff4d4f', fillOpacity:0.25 }).addTo(map);
-      const parts = id.split('_'); const orig = parts.slice(1).join('_');
-      socket.emit('updateRadius', { id: orig, radius: m, color: p.pinColor });
+      const parts = id.split('_'); const orig = parts.slice(1).join('_'); const owner = parts[0];
+      if (isHost) {
+        socket.emit('updateRadius', { id: orig, radius: m, color: p.pinColor, ownerClientId: owner });
+      } else {
+        socket.emit('updateRadius', { id: orig, radius: m, color: p.pinColor });
+      }
       renderSidebarEntry(id); p.marker.closePopup(); updateLines();
     });
     p.marker.bindPopup(ui).openPopup();
@@ -278,6 +535,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderSidebarEntry(id); updateLines();
   }
 
+  function applyRemoteElevation(id, elevation) {
+    const p = pins[id]; if (!p) return;
+    p.elevation = elevation;
+    renderSidebarEntry(id);
+  }
+
+  function applyRemoteBearing(id, bearing) {
+    const p = pins[id]; if (!p) return;
+    p.bearing = bearing;
+    renderSidebarEntry(id);
+  }
+
   function removePin(id) {
     const p = pins[id]; if (!p) return;
     if (p.marker) try { map.removeLayer(p.marker); } catch(e){}
@@ -288,12 +557,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateLines();
   }
 
-  // sidebar entry: delete emits owner info (so server can route removal to owner)
+  // --- Sidebar entry: delete + elevation/bearing edits --- //
   function renderSidebarEntry(id) {
-    const p = pins[id]; if (!p) return;
+    const p = pins[id];
+    if (!p) return;
     const latlng = p.marker.getLatLng();
     let li = sidebar.querySelector(`li[data-id="${id}"]`);
-    if (!li) { li = document.createElement('li'); li.dataset.id = id; sidebar.appendChild(li); }
+    if (!li) {
+      li = document.createElement('li');
+      li.dataset.id = id;
+      sidebar.appendChild(li);
+    }
     li.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div style="font-weight:700">${escapeHtml(p.clientName || p.clientId)}</div>
@@ -320,12 +594,40 @@ document.addEventListener('DOMContentLoaded', async () => {
       };
     }
     const elevInp = li.querySelector('.elev-inp');
-    elevInp.onkeydown = e => { if (e.key==='Enter') { const val = parseFloat(elevInp.value)||0; p.elevation=val; const parts=id.split('_'); socket.emit('updateElevation',{id:parts.slice(1).join('_'), elevation:val}); } };
+    elevInp.onkeydown = e => {
+      if (e.key==='Enter') {
+        const val = parseFloat(elevInp.value) || 0;
+        p.elevation = val;
+        const parts = id.split('_');
+        const orig = parts.slice(1).join('_');
+        const owner = parts[0];
+        if (isHost) {
+          socket.emit('updateElevation', { id: orig, elevation: val, ownerClientId: owner });
+        } else {
+          socket.emit('updateElevation', { id: orig, elevation: val });
+        }
+        renderSidebarEntry(id);
+      }
+    };
     const bearInp = li.querySelector('.bear-inp');
-    bearInp.onkeydown = e => { if (e.key==='Enter') { const val = parseFloat(bearInp.value)||0; p.bearing=val; const parts=id.split('_'); socket.emit('updateBearing',{id:parts.slice(1).join('_'), bearing:val}); } };
+    bearInp.onkeydown = e => {
+      if (e.key==='Enter') {
+        const val = parseFloat(bearInp.value) || 0;
+        p.bearing = val;
+        const parts = id.split('_');
+        const orig = parts.slice(1).join('_');
+        const owner = parts[0];
+        if (isHost) {
+          socket.emit('updateBearing', { id: orig, bearing: val, ownerClientId: owner });
+        } else {
+          socket.emit('updateBearing', { id: orig, bearing: val });
+        }
+        renderSidebarEntry(id);
+      }
+    };
   }
 
-  // LINES & filtering
+  // --- Lines rendering (host and client) --- //
   function updateLines() {
     for (const k in lines) { try { map.removeLayer(lines[k]); } catch(e){} delete lines[k]; }
     const LINE_COLOR = '#ff4d4f';
@@ -357,7 +659,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // user dot
+  // --- User dot --- //
   function placeUserDot(latlng, renderOnly, clientName, userDotColor=null) {
     if (!isHost && userMarker) { try { map.removeLayer(userMarker); } catch(e){} userMarker = null; if (userSidebar) { userSidebar.remove(); userSidebar = null; } }
     const dotColor = userDotColor || '#1e88e5';
@@ -380,7 +682,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateLines();
   }
 
-  // clearing helpers
+  // --- Clearing helpers --- //
   function clearClientData(clientId) {
     Object.entries(pins).forEach(([key,p]) => {
       if (p.clientId === clientId) {
@@ -406,8 +708,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     Object.keys(userDots).forEach(k => delete userDots[k]);
     Object.values(lines).forEach(l => { try { if (l) map.removeLayer(l); } catch(e){} });
     Object.keys(lines).forEach(k => delete lines[k]);
+    Object.keys(shapes).forEach(sid => removeShapeLocal(sid, true));
     if (userMarker) { try { map.removeLayer(userMarker); } catch(e){} userMarker=null; }
     sidebar.innerHTML = '';
+    if (isHost) { sidebar.appendChild(overlaysContainer); renderShapesList(); }
     selectedClientId = null;
     updateLines();
   }
@@ -430,6 +734,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     for (const k in lines) { try { map.removeLayer(lines[k]); } catch(e){} delete lines[k]; }
     updateLines();
+    // Also hide host-only shapes when filtering? currently leave shapes visible (host-owned).
   }
 
   function showAllClients() {
@@ -445,11 +750,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateLines();
   }
 
-  // helpers
+  // --- Helpers --- //
   function showStatus(msg) { statusBar.textContent = msg; statusBar.classList.add('show'); setTimeout(()=>statusBar.classList.remove('show'),2200); }
   function escapeHtml(s) { return (s+'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
-  // optional saved load
   function loadSavedPins() {
     const saved = JSON.parse(localStorage.getItem('pins')||'{}');
     for (const id in saved) {

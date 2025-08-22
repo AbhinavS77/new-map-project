@@ -1,4 +1,4 @@
-// server.js (updated removePin semantics + clearClientPins / clearAll)
+// server.js (with shapes support + UDP broadcaster + validation)
 const express = require('express');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
@@ -14,7 +14,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use('/tiles', express.static(path.join(__dirname, 'India Tiles')));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
-// UDP broadcaster
+// UDP broadcaster (discovery)
 (function startBroadcaster() {
   try {
     const sock = dgram.createSocket('udp4');
@@ -32,9 +32,14 @@ app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 })();
 
 const clients = new Map();
+// shapes: Map shapeId -> shapeObject
+const shapes = new Map();
 
 io.on('connection', socket => {
   console.log('Connected:', socket.id, socket.handshake.query);
+
+  // Send existing shapes to newly connected socket
+  socket.emit('shapesUpdated', Array.from(shapes.values()));
 
   socket.on('clientInfo', info => {
     clients.set(socket.id, info || {});
@@ -48,29 +53,53 @@ io.on('connection', socket => {
     socket.emit('pinAdded', { ...d, clientId: socket.id, clientName: info.name, pinColor: info.pinColor });
   });
 
-  // removePin now accepts an object: { id: <origId>, ownerClientId?: <ownerId> }
-  socket.on('removePin', (payload) => {
-    // backward compatibility: payload might be string id
-    const data = (typeof payload === 'string') ? { id: payload } : (payload || {});
-    // owner is provided or fallback to socket.id
-    const ownerId = data.ownerClientId || socket.id;
+  // SHAPE EVENTS (host-only)
+  socket.on('newShape', shape => {
+    if (socket.handshake.query.isHost !== 'true') {
+      console.warn(`Non-host attempted newShape: ${socket.id}`);
+      return;
+    }
+    if (!shape || !shape.id) return;
+    shapes.set(shape.id, shape);
+    io.emit('shapeAdded', shape);
+  });
 
-    // Validation: if requester is not host and not the owner, reject
+  socket.on('updateShape', shape => {
+    if (socket.handshake.query.isHost !== 'true') {
+      console.warn(`Non-host attempted updateShape: ${socket.id}`);
+      return;
+    }
+    if (!shape || !shape.id) return;
+    shapes.set(shape.id, shape);
+    io.emit('shapeUpdated', shape);
+  });
+
+  socket.on('removeShape', shapeId => {
+    if (socket.handshake.query.isHost !== 'true') {
+      console.warn(`Non-host attempted removeShape: ${socket.id}`);
+      return;
+    }
+    if (!shapeId) return;
+    shapes.delete(shapeId);
+    io.emit('shapeRemoved', shapeId);
+  });
+
+  // removePin (owner + host)
+  socket.on('removePin', (payload) => {
+    const data = (typeof payload === 'string') ? { id: payload } : (payload || {});
+    const ownerId = data.ownerClientId || socket.id;
     const requesterIsHost = socket.handshake.query.isHost === 'true';
     if (!requesterIsHost && ownerId !== socket.id) {
-      // ignore invalid request
       console.warn(`Unauthorized removePin attempt by ${socket.id} for owner ${ownerId}`);
       return;
     }
 
-    // Notify host (if present) and the owner
     const hostSocket = Array.from(io.sockets.sockets.values()).find(s => s.handshake.query.isHost === 'true');
     const ownerSocket = io.sockets.sockets.get(ownerId);
 
     if (hostSocket) hostSocket.emit('pinRemoved', { id: data.id, clientId: ownerId });
     if (ownerSocket) ownerSocket.emit('pinRemoved', { id: data.id, clientId: ownerId });
 
-    // also confirm to requester (host or client)
     socket.emit('pinRemoved', { id: data.id, clientId: ownerId });
   });
 
@@ -81,26 +110,30 @@ io.on('connection', socket => {
   });
 
   socket.on('clearAll', () => {
+    shapes.clear(); // clear shapes too when host clears all
     io.emit('allCleared');
   });
 
-  socket.on('updateRadius', d => {
+  // Forwarding updates for radius/elevation/bearing with ownerClientId support
+  // The payload may include ownerClientId when the host edits a client's pin.
+  function forwardToHostAndOwner(eventName, payload) {
+    const ownerId = payload.ownerClientId || socket.id; // if host is sender, ownerClientId must be included
     const hostSocket = Array.from(io.sockets.sockets.values()).find(s => s.handshake.query.isHost === 'true');
-    if (hostSocket) hostSocket.emit('updateRadius', { ...d, clientId: socket.id });
-    socket.emit('updateRadius', { ...d, clientId: socket.id });
-  });
+    const ownerSocket = io.sockets.sockets.get(ownerId);
 
-  socket.on('updateElevation', d => {
-    const hostSocket = Array.from(io.sockets.sockets.values()).find(s => s.handshake.query.isHost === 'true');
-    if (hostSocket) hostSocket.emit('updateElevation', { ...d, clientId: socket.id });
-    socket.emit('updateElevation', { ...d, clientId: socket.id });
-  });
+    const out = Object.assign({}, payload);
+    // remove ownerClientId from out when forwarding; server will include clientId
+    delete out.ownerClientId;
 
-  socket.on('updateBearing', d => {
-    const hostSocket = Array.from(io.sockets.sockets.values()).find(s => s.handshake.query.isHost === 'true');
-    if (hostSocket) hostSocket.emit('updateBearing', { ...d, clientId: socket.id });
-    socket.emit('updateBearing', { ...d, clientId: socket.id });
-  });
+    if (hostSocket) hostSocket.emit(eventName, { ...out, clientId: ownerId });
+    if (ownerSocket) ownerSocket.emit(eventName, { ...out, clientId: ownerId });
+    // also acknowledge to the requester
+    socket.emit(eventName, { ...out, clientId: ownerId });
+  }
+
+  socket.on('updateRadius', d => forwardToHostAndOwner('updateRadius', d || {}));
+  socket.on('updateElevation', d => forwardToHostAndOwner('updateElevation', d || {}));
+  socket.on('updateBearing', d => forwardToHostAndOwner('updateBearing', d || {}));
 
   socket.on('userDotPlaced', d => {
     const info = clients.get(socket.id) || {};
