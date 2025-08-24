@@ -43,16 +43,26 @@ const shapes = new Map();
 // --- Chat state & limits (in-memory) ---
 const chatHistory = [];
 const MAX_CHAT_HISTORY = 500;        // keep last N messages
-const MAX_MESSAGE_LENGTH = 1000;    // trim/limit message size
-const MIN_MS_BETWEEN_MSG = 300;     // simple per-socket anti-spam (ms)
+const MAX_MESSAGE_LENGTH = 1000;     // trim/limit message size
+const MIN_MS_BETWEEN_MSG = 300;      // simple per-socket anti-spam (ms)
 
 // helper to find host socket (single host design)
 function findHostSocket() {
   return Array.from(io.sockets.sockets.values()).find(s => s.handshake.query && s.handshake.query.isHost === 'true');
 }
 
+// helper to create stable ids for messages
+function makeMsgId(prefix = 'srv') {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,9)}`;
+}
+
 io.on('connection', socket => {
   console.log('Connected:', socket.id, socket.handshake.query);
+
+  // Ensure existing chatHistory entries have ids (generate if missing)
+  for (let m of chatHistory) {
+    if (!m.id) m.id = makeMsgId();
+  }
 
   // Send existing shapes to newly connected socket
   socket.emit('shapesUpdated', Array.from(shapes.values()));
@@ -99,18 +109,26 @@ io.on('connection', socket => {
       if (!text) return;
 
       const info = clients.get(socket.id) || {};
+      // preserve incoming id if provided (client-side dedupe), otherwise create one
+      const id = (incoming.id && typeof incoming.id === 'string') ? incoming.id : makeMsgId();
+
+      const isSenderHost = !!(socket.handshake.query && socket.handshake.query.isHost === 'true');
+
       const msg = {
+        id,
         clientId: socket.id,
         name: info.name || socket.id,
         text,
-        ts: incoming.ts || now
+        ts: incoming.ts || now,
+        serverTs: now,
+        fromHost: isSenderHost   // NEW: client can use this to highlight host messages
       };
 
       // push to history (sliding window)
       chatHistory.push(msg);
       if (chatHistory.length > MAX_CHAT_HISTORY) chatHistory.shift();
 
-      // broadcast to all connected clients
+      // broadcast once to everyone (send identical msg that includes id)
       io.emit('chatMessage', msg);
     } catch (err) {
       console.error('chatMessage handler error', err);
@@ -162,25 +180,19 @@ io.on('connection', socket => {
   socket.on('removePin', (payload) => {
     const data = (typeof payload === 'string') ? { id: payload } : (payload || {});
     const ownerId = data.ownerClientId || socket.id;
+    // authorization
     const requesterIsHost = socket.handshake.query && socket.handshake.query.isHost === 'true';
     if (!requesterIsHost && ownerId !== socket.id) {
       console.warn(`Unauthorized removePin attempt by ${socket.id} for owner ${ownerId}`);
       return;
     }
 
-    const hostSocket = findHostSocket();
-    const ownerSocket = io.sockets.sockets.get(ownerId);
-
-    if (hostSocket) hostSocket.emit('pinRemoved', { id: data.id, clientId: ownerId });
-    if (ownerSocket) ownerSocket.emit('pinRemoved', { id: data.id, clientId: ownerId });
-
+    // broadcast once (client handlers use clientId + id)
     io.emit('pinRemoved', { id: data.id, clientId: ownerId });
   });
 
   socket.on('clearClientPins', () => {
-    const hostSocket = findHostSocket();
-    if (hostSocket) hostSocket.emit('clientCleared', { clientId: socket.id });
-    socket.emit('clientCleared', { clientId: socket.id });
+    // broadcast once
     io.emit('clientCleared', { clientId: socket.id });
   });
 
@@ -190,29 +202,33 @@ io.on('connection', socket => {
   });
 
   // Forwarding updates for radius/elevation/bearing with ownerClientId support
-  function forwardToHostAndOwner(eventName, payload) {
-    const ownerId = payload.ownerClientId || socket.id; // if host is sender, ownerClientId must be included
-    const hostSocket = findHostSocket();
-    const ownerSocket = io.sockets.sockets.get(ownerId);
-
-    const out = Object.assign({}, payload);
+  socket.on('updateRadius', d => {
+    const ownerId = (d && d.ownerClientId) ? d.ownerClientId : socket.id;
+    const out = Object.assign({}, d || {});
     delete out.ownerClientId;
+    io.emit('updateRadius', { ...out, clientId: ownerId });
+  });
 
-    if (hostSocket) hostSocket.emit(eventName, { ...out, clientId: ownerId });
-    if (ownerSocket) ownerSocket.emit(eventName, { ...out, clientId: ownerId });
-    socket.emit(eventName, { ...out, clientId: ownerId });
-  }
+  socket.on('updateElevation', d => {
+    const ownerId = (d && d.ownerClientId) ? d.ownerClientId : socket.id;
+    const out = Object.assign({}, d || {});
+    delete out.ownerClientId;
+    io.emit('updateElevation', { ...out, clientId: ownerId });
+  });
 
-  socket.on('updateRadius', d => forwardToHostAndOwner('updateRadius', d || {}));
-  socket.on('updateElevation', d => forwardToHostAndOwner('updateElevation', d || {}));
-  socket.on('updateBearing', d => forwardToHostAndOwner('updateBearing', d || {}));
+  socket.on('updateBearing', d => {
+    const ownerId = (d && d.ownerClientId) ? d.ownerClientId : socket.id;
+    const out = Object.assign({}, d || {});
+    delete out.ownerClientId;
+    io.emit('updateBearing', { ...out, clientId: ownerId });
+  });
 
   socket.on('userDotPlaced', d => {
     const info = clients.get(socket.id) || {};
-    const hostSocket = findHostSocket();
     const payload = { ...d, clientId: socket.id, clientName: info.name, userDotColor: info.userDotColor };
-    if (hostSocket) hostSocket.emit('userDotPlaced', payload);
+    // send ack to sender (so client can place its own dot in non-host mode)
     socket.emit('userDotPlacedAck', payload);
+    // broadcast to everyone (host will react; other clients ignore unless needed)
     io.emit('userDotPlaced', payload);
   });
 
@@ -221,8 +237,6 @@ io.on('connection', socket => {
     clients.delete(socket.id);
     io.emit('clientsUpdated', Array.from(clients.entries()));
     io.emit('clientDisconnected', socket.id);
-    const hostSocket = findHostSocket();
-    if (hostSocket) hostSocket.emit('clientDisconnected', socket.id);
   });
 });
 

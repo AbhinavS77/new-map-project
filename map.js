@@ -80,7 +80,7 @@ function randomPastel() {
   return `hsl(${h} ${s}% ${l}%)`;
 }
 
-// --- DOM refs & state --- //
+// --- DOM refs & state ---
 document.addEventListener('DOMContentLoaded', async () => {
   // UI refs
   const modal = document.getElementById('connection-modal');
@@ -125,6 +125,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   const shapes = {};  // shapeId -> { marker, overlay, meta }
   let selectedClientId = null;
   let currentShapePlacement = null;
+
+  // Track chat IDs we sent (to dedupe server echo)
+  const sentChatIds = new Set();
+  // Fallback mapping if server doesn't echo id: key `${text}|${ts}` -> id
+  const sentChatFallback = new Map();
 
   // overlays container (host only)
   const overlaysContainer = document.createElement('div');
@@ -234,6 +239,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       .system-chat-msg .meta { font-size:11px;color:#6b7280;margin-bottom:4px; }
       .system-chat-msg .text { background:#fff;padding:8px;border-radius:8px;border:1px solid #eef2f7; font-size:13px; color:#111827; }
+
+      /* Host message highlight (clients only) */
+      .system-chat-msg.host-msg .text {
+        background: #fff9db; /* light yellow */
+        border: 1px solid #f0d57a;
+      }
+
+      /* small-session chat highlight */
+      .chat-wrapper.host-msg .chat-text {
+        background: #fff9db;
+        border: 1px solid #f0d57a;
+        border-radius: 8px;
+        padding: 8px;
+      }
     `;
     document.head.appendChild(s);
   })();
@@ -428,21 +447,26 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Append message to both existing chatMessages (if present) and system chat panel.
   function appendChatMessage(msgObj, opts = {}) {
-    // msgObj: { clientId, name, text, ts }
+    // msgObj: { id?, clientId, name, text, ts, fromHost? }
     const name = escapeHtml(msgObj.name || msgObj.clientId || 'Unknown');
     const time = formatTime(msgObj.ts);
-    const textHtml = `<div class="system-chat-msg"><div class="meta">${name} <span style="margin-left:8px;color:#9ca3af;font-weight:500">${time}</span></div><div class="text">${escapeHtml(msgObj.text)}</div></div>`;
+    // highlight host messages only on CLIENT UIs (not on the host's own UI)
+    const isFromHost = !!msgObj.fromHost;
+    const shouldHighlightAsHost = isFromHost && !isHost;
 
     // append to existing (session) chatMessages DOM if present
     if (chatMessages) {
       try {
         const wrapper = document.createElement('div');
         wrapper.style.marginBottom = '8px';
+        wrapper.className = 'chat-wrapper';
+        if (shouldHighlightAsHost) wrapper.classList.add('host-msg');
+
         wrapper.innerHTML = `<div style="font-size:12px;color:#6b7280;margin-bottom:2px">${name} <span style="font-size:11px;color:#9ca3af;margin-left:6px">${time}</span></div>
-                             <div style="background:#fff;padding:8px;border-radius:8px;border:1px solid #eef2f7">${escapeHtml(msgObj.text)}</div>`;
+                             <div class="chat-text" style="background:#fff;padding:8px;border-radius:8px;border:1px solid #eef2f7">${escapeHtml(msgObj.text)}</div>`;
         chatMessages.appendChild(wrapper);
         if (!opts.skipScroll) chatMessages.scrollTop = chatMessages.scrollHeight;
-      } catch(e){}
+      } catch(e){ console.warn('appendChatMessage (session) error', e); }
     }
 
     // append to system chat panel if exists
@@ -451,6 +475,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         // create DOM node rather than innerHTML concat to keep safe
         const div = document.createElement('div');
         div.className = 'system-chat-msg';
+        if (shouldHighlightAsHost) div.classList.add('host-msg');
+
         const meta = document.createElement('div');
         meta.className = 'meta';
         meta.textContent = name + ' ';
@@ -458,14 +484,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         timeSpan.style.marginLeft = '8px'; timeSpan.style.color = '#9ca3af'; timeSpan.style.fontWeight = 500;
         timeSpan.textContent = time;
         meta.appendChild(timeSpan);
+
         const txt = document.createElement('div');
         txt.className = 'text';
         txt.textContent = msgObj.text;
+
         div.appendChild(meta);
         div.appendChild(txt);
         systemChat.messages.appendChild(div);
         if (!opts.skipScroll) systemChat.messages.scrollTop = systemChat.messages.scrollHeight;
-      } catch(e){}
+      } catch(e){ console.warn('appendChatMessage (system) error', e); }
     }
   }
 
@@ -475,14 +503,29 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!inputEl || !socket) return;
     const text = (inputEl.value || '').trim();
     if (!text) return;
-    const msg = { text, ts: Date.now() };
+
+    // create a small unique id for deduping
+    const msgId = Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,9);
+    const tsNow = Date.now();
+
+    const msg = { id: msgId, text, ts: tsNow };
     const name = clientNameInput && clientNameInput.value && clientNameInput.value.trim() ? clientNameInput.value.trim() : (socket && socket.id);
     msg.name = name;
-    socket.emit('chatMessage', msg);
-    inputEl.value = '';
 
-    // optimistically append for local UI (server also echoes to all clients)
-    appendChatMessage({ clientId: socket.id, name, text: msg.text, ts: msg.ts });
+    // remember we sent this id (for dedupe when server echoes)
+    sentChatIds.add(msgId);
+    sentChatFallback.set(`${text}|${tsNow}`, msgId);
+
+    // optimistic append (user sees immediately)
+    // mark local message as fromHost if this client is host (so server and clients can also know)
+    const optimistic = { clientId: socket.id, id: msgId, name, text: msg.text, ts: msg.ts, fromHost: !!isHost };
+    appendChatMessage(optimistic);
+
+    // send to server
+    socket.emit('chatMessage', msg);
+
+    // clear input
+    inputEl.value = '';
   }
 
   // Chat UI events for existing session UI (keeps backward compatibility)
@@ -660,11 +703,44 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Clear both UI locations
       if (chatMessages) chatMessages.innerHTML = '';
       if (systemChat.messages) systemChat.messages.innerHTML = '';
-      history.forEach(m => appendChatMessage(m, { skipScroll: true }));
+      history.forEach(m => {
+        // If server history contains messages we optimistically added, skip them
+        if (m && m.id && sentChatIds.has(m.id)) {
+          sentChatIds.delete(m.id);
+          // also remove any fallback entries that referred to this id
+          for (const [key, v] of sentChatFallback.entries()) if (v === m.id) sentChatFallback.delete(key);
+          return;
+        }
+        // fallback: server might not echo id but might echo text+ts; skip if matches our fallback map
+        if ((!m.id) && m.text && m.ts && sentChatFallback.has(`${m.text}|${m.ts}`)) {
+          const matchedId = sentChatFallback.get(`${m.text}|${m.ts}`);
+          sentChatFallback.delete(`${m.text}|${m.ts}`);
+          sentChatIds.delete(matchedId);
+          return;
+        }
+        appendChatMessage(m, { skipScroll: true });
+      });
       if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
       if (systemChat.messages) systemChat.messages.scrollTop = systemChat.messages.scrollHeight;
     });
+
+    // Deduplicating handler: ignore server echoes for messages we already appended locally
     socket.on('chatMessage', m => {
+      if (!m) return;
+      if (m.id && sentChatIds.has(m.id)) {
+        // server echoed our message; remove id from set and do not append again
+        sentChatIds.delete(m.id);
+        // also clear fallback entries that referenced this id
+        for (const [key, v] of sentChatFallback.entries()) if (v === m.id) sentChatFallback.delete(key);
+        return;
+      }
+      // fallback: server didn't include id but text+ts match
+      if ((!m.id) && m.text && m.ts && sentChatFallback.has(`${m.text}|${m.ts}`)) {
+        const matchedId = sentChatFallback.get(`${m.text}|${m.ts}`);
+        sentChatFallback.delete(`${m.text}|${m.ts}`);
+        sentChatIds.delete(matchedId);
+        return;
+      }
       appendChatMessage(m);
     });
 

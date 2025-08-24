@@ -22,6 +22,15 @@
     #status-popup.show{opacity:1}
     #pinned-locations{list-style:none;padding:0;display:flex;flex-direction:column;gap:8px}
     #pinned-locations li{background:#fcfcff;padding:10px;border-radius:8px;border:1px solid #eef2f7}
+
+    /* overlays controls styling */
+    .overlays-controls { margin-bottom:14px; padding:10px; border-radius:8px; background:#fff; border:1px solid #eef2f7; }
+    .overlays-controls h3 { margin-bottom:8px; font-size:16px; }
+    .overlays-row { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
+    .overlays-row input[type="text"] { flex:1; padding:8px; border-radius:8px; border:1px solid #e6e9ef; font-size:13px; }
+    .overlays-row .small { width:120px; }
+    .overlays-pin { background:#1e88e5; color:#fff; padding:8px 10px; border-radius:8px; cursor:pointer; border:none }
+    .overlays-help { font-size:12px; color:#6b7280; margin-top:6px; }
   </style>
 </head>
 <body>
@@ -55,6 +64,24 @@
   <div class="container" id="main-container" style="display:none;">
     <div id="sidebar">
       <h2>Pinned Locations</h2>
+
+      <!-- OVERLAYS CONTROLS (Lat/Lon + Pin button) -->
+      <div id="overlays-container" class="overlays-controls">
+        <h3>Overlays</h3>
+
+        <!-- Lat / Long row -->
+        <div class="overlays-row">
+          <input id="overlay-lat-input" class="small" type="text" placeholder="Latitude (e.g. 28.6139)" />
+          <input id="overlay-lon-input" class="small" type="text" placeholder="Longitude (e.g. 77.2090)" />
+          <button id="overlay-pin-btn" class="overlays-pin">Pin</button>
+        </div>
+
+        <div class="overlays-help">Enter lat &amp; long, then click <strong>Pin</strong> to center the map on that coordinate.</div>
+
+        <div id="overlays-list" style="margin-top:12px"></div>
+      </div>
+      <!-- END OVERLAYS CONTROLS -->
+
       <ul id="pinned-locations"></ul>
     </div>
 
@@ -69,13 +96,10 @@
         <button id="rf-toggle-btn" class="btn">RF Mode OFF</button>
         <button id="radar-toggle-btn" class="btn">Radar Mode OFF</button>
 
-        <!-- ADDED: Generate Pin button (same .btn style as others). 
-             Placed here above Clear All as you requested. -->
-            <button id="generate-ID-btn" class="btn">Genreate Id</button>
+        <!-- ADDED: Generate Pin button (same .btn style as others). -->
+        <button id="generate-ID-btn" class="btn">Genreate Id</button>
 
-            <!-- Add inside #floating-buttons (above Clear All or wherever) -->
-            <button id="chat-btn" class="btn">Chat</button>
-
+        <button id="chat-btn" class="btn">Chat</button>
 
         <button id="clear-btn" class="btn" style="background:#ef4444;color:#fff">Clear All</button>
       </div>
@@ -90,20 +114,17 @@
   <script src="public/js/socket.io.min.js"></script>
   <script src="map.js"></script>
 
-
   <!-- Put this near the end of body (e.g. just before </body>) -->
-<div id="chat-modal" style="display:none;position:fixed;right:18px;bottom:18px;width:360px;max-height:70vh;background:#fff;border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,0.12);z-index:4000;overflow:hidden;display:flex;flex-direction:column;">
-  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #eef2f7;">
-    <div style="font-weight:700">Session Chat</div>
-    <button id="chat-close-btn" class="btn" style="padding:6px 8px">✕</button>
+  <div id="chat-modal" style="display:none;position:fixed;right:18px;bottom:18px;width:360px;max-height:70vh;background:#fff;border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,0.12);z-index:4000;overflow:hidden;display:flex;flex-direction:column;">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #eef2f7;">
+      <div style="font-weight:700">Session Chat</div>
+      <button id="chat-close-btn" class="btn" style="padding:6px 8px">✕</button>
+    </div>
+    <div id="chat-messages" style="padding:8px;overflow:auto;flex:1;background:#fbfcff"></div>
+    <div style="padding:8px;border-top:1px solid #eef2f7;display:flex;gap:8px;align-items:center;">
+      <input id="chat-input" placeholder="Type a message and press Enter" style="flex:1;padding:8px;border-radius:8px;border:1px solid #e6e9ef" />
+      <button id="chat-send" class="btn" style="background:#1e88e5;color:#fff;padding:8px 10px;border-radius:8px">Send</button>
+    </div>
   </div>
-  <div id="chat-messages" style="padding:8px;overflow:auto;flex:1;background:#fbfcff"></div>
-  <div style="padding:8px;border-top:1px solid #eef2f7;display:flex;gap:8px;align-items:center;">
-    <input id="chat-input" placeholder="Type a message and press Enter" style="flex:1;padding:8px;border-radius:8px;border:1px solid #e6e9ef" />
-    <button id="chat-send" class="btn" style="background:#1e88e5;color:#fff;padding:8px 10px;border-radius:8px">Send</button>
-  </div>
-</div>
-
-
 </body>
 </html>
