@@ -64,6 +64,19 @@
       <div id="floating-buttons">
         <button id="user-toggle-btn" class="btn">User Mode OFF</button>
         <button id="pin-toggle-btn" class="btn">Pin Mode OFF</button>
+
+        <!-- Added RF and Radar buttons above Clear All as requested -->
+        <button id="rf-toggle-btn" class="btn">RF Mode OFF</button>
+        <button id="radar-toggle-btn" class="btn">Radar Mode OFF</button>
+
+        <!-- ADDED: Generate Pin button (same .btn style as others). 
+             Placed here above Clear All as you requested. -->
+            <button id="generate-ID-btn" class="btn">Genreate Id</button>
+
+            <!-- Add inside #floating-buttons (above Clear All or wherever) -->
+            <button id="chat-btn" class="btn">Chat</button>
+
+
         <button id="clear-btn" class="btn" style="background:#ef4444;color:#fff">Clear All</button>
       </div>
 
@@ -76,5 +89,21 @@
   <script src="public/js/leaflet.js"></script>
   <script src="public/js/socket.io.min.js"></script>
   <script src="map.js"></script>
+
+
+  <!-- Put this near the end of body (e.g. just before </body>) -->
+<div id="chat-modal" style="display:none;position:fixed;right:18px;bottom:18px;width:360px;max-height:70vh;background:#fff;border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,0.12);z-index:4000;overflow:hidden;display:flex;flex-direction:column;">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #eef2f7;">
+    <div style="font-weight:700">Session Chat</div>
+    <button id="chat-close-btn" class="btn" style="padding:6px 8px">✕</button>
+  </div>
+  <div id="chat-messages" style="padding:8px;overflow:auto;flex:1;background:#fbfcff"></div>
+  <div style="padding:8px;border-top:1px solid #eef2f7;display:flex;gap:8px;align-items:center;">
+    <input id="chat-input" placeholder="Type a message and press Enter" style="flex:1;padding:8px;border-radius:8px;border:1px solid #e6e9ef" />
+    <button id="chat-send" class="btn" style="background:#1e88e5;color:#fff;padding:8px 10px;border-radius:8px">Send</button>
+  </div>
+</div>
+
+
 </body>
 </html>

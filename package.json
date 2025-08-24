@@ -7,12 +7,24 @@
     "package": "electron-packager . CollaborativeMap --platform=win32 --arch=x64 --out=release-builds --overwrite"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "socket.io": "^4.7.2",
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1",
     "sqlite3": "^5.1.6"
   },
   "devDependencies": {
     "electron": "^25.3.1",
     "electron-packager": "^17.1.1"
-  }
+  },
+  "description": "",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vaman-dev/jsonMap.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/vaman-dev/jsonMap/issues"
+  },
+  "homepage": "https://github.com/vaman-dev/jsonMap#readme"
 }

@@ -1,4 +1,4 @@
-// server.js (with shapes support + UDP broadcaster + validation)
+// server.js (with shapes, chat support, UDP broadcaster, validation)
 const express = require('express');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
@@ -7,7 +7,12 @@ const dgram = require('dgram');
 
 const app = express();
 const httpServer = createServer(app);
-const io = new Server(httpServer);
+
+// enable CORS for socket.io (helps Electron clients connecting from file:// or other origins)
+const io = new Server(httpServer, {
+  cors: { origin: "*", methods: ["GET", "POST"] }
+});
+
 const PORT = 3000;
 
 app.use(express.static(path.join(__dirname, 'public')));
@@ -35,27 +40,96 @@ const clients = new Map();
 // shapes: Map shapeId -> shapeObject
 const shapes = new Map();
 
+// --- Chat state & limits (in-memory) ---
+const chatHistory = [];
+const MAX_CHAT_HISTORY = 500;        // keep last N messages
+const MAX_MESSAGE_LENGTH = 1000;    // trim/limit message size
+const MIN_MS_BETWEEN_MSG = 300;     // simple per-socket anti-spam (ms)
+
+// helper to find host socket (single host design)
+function findHostSocket() {
+  return Array.from(io.sockets.sockets.values()).find(s => s.handshake.query && s.handshake.query.isHost === 'true');
+}
+
 io.on('connection', socket => {
   console.log('Connected:', socket.id, socket.handshake.query);
 
   // Send existing shapes to newly connected socket
   socket.emit('shapesUpdated', Array.from(shapes.values()));
+  // Send chat history to newly connected socket
+  socket.emit('chatHistory', chatHistory);
+
+  // init per-socket rate-limit state
+  socket._lastChatTs = 0;
 
   socket.on('clientInfo', info => {
     clients.set(socket.id, info || {});
     io.emit('clientsUpdated', Array.from(clients.entries()));
   });
 
+  // NEW PIN: prefer client-sent pinColor (so RF green stays green)
   socket.on('newPin', d => {
     const info = clients.get(socket.id) || {};
-    const hostSocket = Array.from(io.sockets.sockets.values()).find(s => s.handshake.query.isHost === 'true');
-    if (hostSocket) hostSocket.emit('pinAdded', { ...d, clientId: socket.id, clientName: info.name, pinColor: info.pinColor });
-    socket.emit('pinAdded', { ...d, clientId: socket.id, clientName: info.name, pinColor: info.pinColor });
+    const payload = {
+      ...d,
+      clientId: socket.id,
+      clientName: info.name,
+      // prefer client-specified color; fallback to saved client preference
+      pinColor: (d && d.pinColor) ? d.pinColor : info.pinColor
+    };
+    // broadcast to everyone (host + all clients)
+    io.emit('pinAdded', payload);
+  });
+
+  // --- CHAT: incoming messages ---
+  socket.on('chatMessage', incoming => {
+    try {
+      if (!incoming || typeof incoming.text !== 'string') return;
+      const now = Date.now();
+
+      // rate-limit (simple)
+      if (now - (socket._lastChatTs || 0) < MIN_MS_BETWEEN_MSG) {
+        console.warn(`Rate limited chat from ${socket.id}`);
+        return;
+      }
+      socket._lastChatTs = now;
+
+      // normalize message
+      const text = incoming.text.trim().slice(0, MAX_MESSAGE_LENGTH);
+      if (!text) return;
+
+      const info = clients.get(socket.id) || {};
+      const msg = {
+        clientId: socket.id,
+        name: info.name || socket.id,
+        text,
+        ts: incoming.ts || now
+      };
+
+      // push to history (sliding window)
+      chatHistory.push(msg);
+      if (chatHistory.length > MAX_CHAT_HISTORY) chatHistory.shift();
+
+      // broadcast to all connected clients
+      io.emit('chatMessage', msg);
+    } catch (err) {
+      console.error('chatMessage handler error', err);
+    }
+  });
+
+  // optional: allow host to clear chat history
+  socket.on('clearChat', () => {
+    if (socket.handshake.query && socket.handshake.query.isHost === 'true') {
+      chatHistory.length = 0;
+      io.emit('chatHistory', chatHistory);
+    } else {
+      console.warn(`Non-host attempted clearChat: ${socket.id}`);
+    }
   });
 
   // SHAPE EVENTS (host-only)
   socket.on('newShape', shape => {
-    if (socket.handshake.query.isHost !== 'true') {
+    if (!socket.handshake.query || socket.handshake.query.isHost !== 'true') {
       console.warn(`Non-host attempted newShape: ${socket.id}`);
       return;
     }
@@ -65,7 +139,7 @@ io.on('connection', socket => {
   });
 
   socket.on('updateShape', shape => {
-    if (socket.handshake.query.isHost !== 'true') {
+    if (!socket.handshake.query || socket.handshake.query.isHost !== 'true') {
       console.warn(`Non-host attempted updateShape: ${socket.id}`);
       return;
     }
@@ -75,7 +149,7 @@ io.on('connection', socket => {
   });
 
   socket.on('removeShape', shapeId => {
-    if (socket.handshake.query.isHost !== 'true') {
+    if (!socket.handshake.query || socket.handshake.query.isHost !== 'true') {
       console.warn(`Non-host attempted removeShape: ${socket.id}`);
       return;
     }
@@ -88,25 +162,26 @@ io.on('connection', socket => {
   socket.on('removePin', (payload) => {
     const data = (typeof payload === 'string') ? { id: payload } : (payload || {});
     const ownerId = data.ownerClientId || socket.id;
-    const requesterIsHost = socket.handshake.query.isHost === 'true';
+    const requesterIsHost = socket.handshake.query && socket.handshake.query.isHost === 'true';
     if (!requesterIsHost && ownerId !== socket.id) {
       console.warn(`Unauthorized removePin attempt by ${socket.id} for owner ${ownerId}`);
       return;
     }
 
-    const hostSocket = Array.from(io.sockets.sockets.values()).find(s => s.handshake.query.isHost === 'true');
+    const hostSocket = findHostSocket();
     const ownerSocket = io.sockets.sockets.get(ownerId);
 
     if (hostSocket) hostSocket.emit('pinRemoved', { id: data.id, clientId: ownerId });
     if (ownerSocket) ownerSocket.emit('pinRemoved', { id: data.id, clientId: ownerId });
 
-    socket.emit('pinRemoved', { id: data.id, clientId: ownerId });
+    io.emit('pinRemoved', { id: data.id, clientId: ownerId });
   });
 
   socket.on('clearClientPins', () => {
-    const hostSocket = Array.from(io.sockets.sockets.values()).find(s => s.handshake.query.isHost === 'true');
+    const hostSocket = findHostSocket();
     if (hostSocket) hostSocket.emit('clientCleared', { clientId: socket.id });
     socket.emit('clientCleared', { clientId: socket.id });
+    io.emit('clientCleared', { clientId: socket.id });
   });
 
   socket.on('clearAll', () => {
@@ -115,19 +190,16 @@ io.on('connection', socket => {
   });
 
   // Forwarding updates for radius/elevation/bearing with ownerClientId support
-  // The payload may include ownerClientId when the host edits a client's pin.
   function forwardToHostAndOwner(eventName, payload) {
     const ownerId = payload.ownerClientId || socket.id; // if host is sender, ownerClientId must be included
-    const hostSocket = Array.from(io.sockets.sockets.values()).find(s => s.handshake.query.isHost === 'true');
+    const hostSocket = findHostSocket();
     const ownerSocket = io.sockets.sockets.get(ownerId);
 
     const out = Object.assign({}, payload);
-    // remove ownerClientId from out when forwarding; server will include clientId
     delete out.ownerClientId;
 
     if (hostSocket) hostSocket.emit(eventName, { ...out, clientId: ownerId });
     if (ownerSocket) ownerSocket.emit(eventName, { ...out, clientId: ownerId });
-    // also acknowledge to the requester
     socket.emit(eventName, { ...out, clientId: ownerId });
   }
 
@@ -137,9 +209,11 @@ io.on('connection', socket => {
 
   socket.on('userDotPlaced', d => {
     const info = clients.get(socket.id) || {};
-    const hostSocket = Array.from(io.sockets.sockets.values()).find(s => s.handshake.query.isHost === 'true');
-    if (hostSocket) hostSocket.emit('userDotPlaced', { ...d, clientId: socket.id, clientName: info.name, userDotColor: info.userDotColor });
-    socket.emit('userDotPlacedAck', { ...d, clientId: socket.id, clientName: info.name, userDotColor: info.userDotColor });
+    const hostSocket = findHostSocket();
+    const payload = { ...d, clientId: socket.id, clientName: info.name, userDotColor: info.userDotColor };
+    if (hostSocket) hostSocket.emit('userDotPlaced', payload);
+    socket.emit('userDotPlacedAck', payload);
+    io.emit('userDotPlaced', payload);
   });
 
   socket.on('disconnect', () => {
@@ -147,7 +221,7 @@ io.on('connection', socket => {
     clients.delete(socket.id);
     io.emit('clientsUpdated', Array.from(clients.entries()));
     io.emit('clientDisconnected', socket.id);
-    const hostSocket = Array.from(io.sockets.sockets.values()).find(s => s.handshake.query.isHost === 'true');
+    const hostSocket = findHostSocket();
     if (hostSocket) hostSocket.emit('clientDisconnected', socket.id);
   });
 });
