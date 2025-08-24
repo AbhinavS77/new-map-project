@@ -1,10 +1,13 @@
-// map.js (full) - single-overlay enforced + overlay-pin wiring + elevation/bearing for overlay pins
-// Updated: avoid duplicate overlay entries; split overlay list into pins vs shapes
+// map.js (updated) - group polylines (dotted) + host/client visibility + single-overlay enforcement
 
 // --- Shared ID state (user-visible group IDs) ---
 let currentPinGroupId = "pin-101";   // all normal pins use this until regenerated
 let currentRfGroupId  = "rf-201";    // all RF pins use this until regenerated
 const usedGroupIds = new Set([currentPinGroupId, currentRfGroupId]); // prevent duplicates
+
+// --- Group bookkeeping: pins grouped by groupId, and polylines per group ---
+const groupPins = {};   // groupId -> array of internal pin ids (in insertion order)
+const groupLines = {};  // groupId -> L.Polyline (dotted)
 
 // --- Helpers: marker SVG, shape icons, geodesic math ---
 function createSvgIconDataUrl(hexColor='#ff4d4f', size=[24,38]) {
@@ -84,7 +87,7 @@ function escapeHtml(s) { return (s+'').replace(/[&<>"']/g, c => ({'&':'&amp;','<
 
 // --- DOM refs & state ---
 document.addEventListener('DOMContentLoaded', async () => {
-  // UI refs
+  // UI refs (same as your original)
   const modal = document.getElementById('connection-modal');
   const hostBtn = document.getElementById('host-btn');
   const clientBtn = document.getElementById('client-btn');
@@ -110,7 +113,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   const chatInput = document.getElementById('chat-input');
   const chatSendBtn = document.getElementById('chat-send');
 
-  // --- Chat UI wiring ---
+  // Chat-related helpers (dedupe, append fallback)
+  const sentChatIds = new Set();
+  const sentChatFallback = new Map();
+
   function sendChatFromInput() {
     if (!chatInput) return;
     const text = chatInput.value.trim();
@@ -119,7 +125,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const localId = 'local_' + timestamp + '_' + Math.random().toString(36).slice(2,6);
     const msg = { text, ts: timestamp, id: localId };
 
-    // Track dedupe
     sentChatIds.add(localId);
     sentChatFallback.set(`${msg.text}|${msg.ts}`, localId);
 
@@ -127,7 +132,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       try { socket.emit('chatMessage', msg); } catch(e){ console.warn('chat emit failed', e); }
     }
 
-    // Append locally
     if (typeof appendChatMessage === 'function') {
       appendChatMessage(Object.assign({}, msg, { clientName: (clientNameInput && clientNameInput.value) || 'You', fromHost: !!isHost }));
     } else {
@@ -138,7 +142,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
   }
 
-  // chat modal toggle + send handlers (unchanged)
+  // Chat UI wiring (unchanged)
   if (chatBtn) {
     chatBtn.addEventListener('click', () => {
       if (!chatModal) return;
@@ -172,7 +176,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (chatSendBtn) chatSendBtn.addEventListener('click', sendChatFromInput);
   if (chatInput) chatInput.addEventListener('keydown', (e) => { if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); sendChatFromInput(); } });
 
-  // fallback chat append if original isn't present
   if (typeof appendChatMessage !== 'function') {
     window.appendChatMessage = undefined;
     function appendChatMessageFallback(m, opts) {
@@ -192,58 +195,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.appendChatMessageFallback = appendChatMessageFallback;
   }
 
-  // Generate button
-  const generateBtn = document.getElementById('generate-ID-btn');
-
-  // RF button ref & state
-  const rfBtn = document.getElementById('rf-toggle-btn');
-  let isRFMode = false;
-
-  // state
-  let map = null, socket = null, serverUrl = null, isHost = false;
-  let isUserMode = false, isPinMode = false;
-  let userMarker = null, userSidebar = null;
-  const pins = {};    // key: `${clientId}_${placementId}` or overlay_internal id
-  const userDots = {}; // clientId -> circleMarker
-  const lines = {};   // pinKey -> polyline
-  const shapes = {};  // shapeId -> { marker, overlay, meta }
-  let selectedClientId = null;
-  let currentShapePlacement = null;
-
-  // Track chat IDs we sent (to dedupe server echo)
-  const sentChatIds = new Set();
-  const sentChatFallback = new Map();
-
-  // --- Ensure single overlays panel exists (reuse DOM if present) ---
+  // overlay UI container & insertion (keeps single instance)
   let overlaysContainer = document.getElementById('overlays-container');
-  const overlaysCreatedByScript = !overlaysContainer;
   if (!overlaysContainer) {
     overlaysContainer = document.createElement('div');
     overlaysContainer.id = 'overlays-container';
     overlaysContainer.style.marginTop = '12px';
   }
 
-  // hide app until connected/joined
-  container.style.display = 'none';
-  modal.style.display = 'flex';
-
-  // --- Small CSS for highlights and overlay UI ---
+  // small CSS injection for overlays and chat (unchanged from previous version)
   const _hlStyle = document.createElement('style');
   _hlStyle.id = 'map-overlays-style';
   _hlStyle.textContent = `
-    .pin-highlight {
-      transform: scale(1.35);
-      transition: transform 240ms ease;
-      filter: drop-shadow(0 8px 20px rgba(0,0,0,0.14));
-      z-index: 9999 !important;
-    }
-    /* overlays resizer handle */
+    .pin-highlight { transform: scale(1.35); transition: transform 240ms ease; filter: drop-shadow(0 8px 20px rgba(0,0,0,0.14)); z-index:9999 !important; }
     #overlays-container { position: relative; overflow: auto; min-height: 80px; max-height: 60vh; background:#fff; border:1px solid #eef2f7; border-radius:8px; padding:10px; }
-    #overlays-container .resizer {
-      width: 14px; height: 14px; position: absolute; right:8px; bottom:8px; cursor: se-resize;
-      border-radius: 3px; background: linear-gradient(135deg,#e6eefb,#cfe3ff); box-shadow:0 1px 3px rgba(0,0,0,0.08);
-      display:flex;align-items:center;justify-content:center; z-index: 20;
-    }
+    #overlays-container .resizer { width: 14px; height: 14px; position: absolute; right:8px; bottom:8px; cursor: se-resize; border-radius: 3px; background: linear-gradient(135deg,#e6eefb,#cfe3ff); box-shadow:0 1px 3px rgba(0,0,0,0.08); display:flex;align-items:center;justify-content:center; z-index: 20; }
     #overlays-container .resizer:after { content:''; width:8px; height:8px; border-right:2px solid rgba(0,0,0,0.12); border-bottom:2px solid rgba(0,0,0,0.12); transform:rotate(45deg); }
     #overlays-container .row { display:flex; gap:8px; align-items:center; }
     #overlays-container input[type="text"], #overlays-container input[type="number"] { padding:8px; border-radius:8px; border:1px solid #e6e9ef; font-size:13px; min-width:0; }
@@ -256,81 +222,28 @@ document.addEventListener('DOMContentLoaded', async () => {
     #overlays-container .btn { padding:6px 8px; border-radius:8px; border:1px solid #e6eef7; background:#fff; cursor:pointer; }
     #overlays-container .btn.danger { background:#ef4444; color:#fff; border:none; }
     #overlays-container .btn.secondary { background:#f8fafc; }
-    .shape-entry { /* marker for shape entries so we can clear them easily */ }
+    .shape-entry { }
   `;
   document.head.appendChild(_hlStyle);
 
-  // ------------------ ADD CHAT CSS (for quarter-size floating chat) ------------------
   const _chatStyle = document.createElement('style');
   _chatStyle.id = 'map-chat-style';
   _chatStyle.textContent = `
-    /* floating quarter-size chat modal */
-    #chat-modal {
-      display: none;
-      position: fixed;
-      right: 16px;
-      bottom: 16px;
-      width: 32vw;
-      height: 32vh;
-      min-width: 300px;
-      min-height: 260px;
-      background: #fff;
-      border-radius: 10px;
-      box-shadow: 0 12px 30px rgba(0,0,0,0.18);
-      z-index: 99999;
-      overflow: hidden;
-    }
-    #chat-modal .chat-header {
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      padding:8px 10px;
-      border-bottom:1px solid #eef2f7;
-      font-weight:700;
-    }
-    #chat-messages {
-      padding: 10px;
-      overflow-y: auto;
-      height: calc(100% - 115px);
-      box-sizing: border-box;
-    }
-    #chat-input-row {
-      display:flex;
-      gap:8px;
-      padding:8px 10px;
-      border-top:1px solid #eef2f7;
-      align-items:center;
-      box-sizing:border-box;
-    }
-    #chat-input {
-      flex:1;
-      min-height:36px;
-      max-height:90px;
-      resize: none;
-      padding:8px;
-      border-radius:6px;
-      border:1px solid #e6e9ef;
-      box-sizing:border-box;
-    }
-    #chat-send {
-      padding:8px 12px;
-      border-radius:8px;
-      border:1px solid #e6e9ef;
-      background:#1e88e5;
-      color:#fff;
-      cursor:pointer;
-    }
+    #chat-modal { display:none; position: fixed; right:16px; bottom:16px; width:32vw; height:32vh; min-width:300px; min-height:260px; background:#fff; border-radius:10px; box-shadow:0 12px 30px rgba(0,0,0,0.18); z-index:99999; overflow:hidden; }
+    #chat-modal .chat-header{ display:flex; align-items:center; justify-content:space-between; padding:8px 10px; border-bottom:1px solid #eef2f7; font-weight:700;}
+    #chat-messages { padding:10px; overflow-y:auto; height: calc(100% - 115px); box-sizing:border-box; }
+    #chat-input-row { display:flex; gap:8px; padding:8px 10px; border-top:1px solid #eef2f7; align-items:center; box-sizing:border-box; }
+    #chat-input { flex:1; min-height:36px; max-height:90px; resize:none; padding:8px; border-radius:6px; border:1px solid #e6e9ef; box-sizing:border-box; }
+    #chat-send { padding:8px 12px; border-radius:8px; border:1px solid #e6e9ef; background:#1e88e5; color:#fff; cursor:pointer; }
   `;
   document.head.appendChild(_chatStyle);
-  // -------------------------------------------------------------------------------
 
   try {
     const hosts = await window.electronAPI.discoverHosts();
     if (hosts && hosts.length === 1) showStatus('Host found — enter name to join.');
   } catch(e){ console.warn(e); }
 
-  // --- Helper: render overlay-entry in the overlays panel ---
-  // Now targets #overlay-pins container only (so shapes area remains separate)
+  // --- renderOverlayEntry now targets overlay-pins only ---
   function renderOverlayEntry(internalId, lat, lon, title='Pin') {
     const pinsContainer = overlaysContainer.querySelector('#overlay-pins');
     if (!pinsContainer) return;
@@ -382,7 +295,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         const val = parseFloat(elevInp.value) || 0;
         if (pins[internalId]) {
           pins[internalId].elevation = val;
-          // emit if server-managed
           if (socket && socket.connected) {
             const parts = internalId.split('_');
             const orig = parts.slice(1).join('_');
@@ -418,11 +330,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     };
   }
 
-  // --- attach overlay UI once in initApp (but create HTML here so it can be reused) ---
+  // overlay UI (pins + shapes separate)
   function ensureOverlayUI() {
     if (!overlaysContainer) return;
     if (!overlaysContainer.querySelector('#overlay-lat-input')) {
-      // note: overlays-list now contains two subcontainers: pins and shapes
       overlaysContainer.innerHTML = `
         <h3 style="margin:6px 0 8px">Overlays</h3>
         <div class="row" style="margin-bottom:8px">
@@ -457,25 +368,22 @@ document.addEventListener('DOMContentLoaded', async () => {
           return;
         }
 
-        // If this client is host and connected, broadcast a proper server pin so all clients receive it.
+        // Host: broadcast server-style so all clients (host + their own clients) get correct behaviour.
         if (isHost && socket && socket.connected) {
           const placementId = Date.now().toString() + '_' + Math.random().toString(36).slice(2,7);
           const color = pinColorInput && pinColorInput.value ? pinColorInput.value : '#ff4d4f';
           socket.emit('newPin', { id: placementId, groupId: currentPinGroupId, lat: lat, lon: lon, pinColor: color, rf: false });
-          // center optimistic
           map.setView([lat, lon], Math.max(map.getZoom(), 12), { animate: true });
           showStatus(`Pinned (broadcast) at ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
-          // note: overlay entry will be created when server echoes 'pinAdded' and socket.on('pinAdded') calls renderOverlayEntry
+          // overlay entry will be created when server echoes 'pinAdded' (socket.on('pinAdded'))
           return;
         }
 
-        // fallback: non-host or no socket — create a local overlay pin (internal id)
+        // fallback: local overlay pin (client offline / non-host)
         const internalId = `overlay_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,6)}`;
         const ownerClientId = (socket && socket.id) ? socket.id : 'local';
         addPin(internalId, lat, lon, (clientNameInput && clientNameInput.value) || 'Local', ownerClientId, '#ff4d4f', false, null);
-        // center + zoom
         map.setView([lat, lon], Math.max(map.getZoom(), 12), { animate: true });
-        // render overlay entry (for this local overlay pin)
         renderOverlayEntry(internalId, lat, lon, 'Pin');
         showStatus(`Pinned at ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
       });
@@ -517,6 +425,64 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       resizer.addEventListener('pointerdown', onDown);
     }
+  }
+
+  // --- State ---
+  let map = null, socket = null, serverUrl = null, isHost = false;
+  let isUserMode = false, isPinMode = false;
+  let userMarker = null, userSidebar = null;
+  const pins = {};    // key: `${clientId}_${placementId}` or overlay_internal id
+  const userDots = {}; // clientId -> circleMarker
+  const lines = {};   // pinKey -> polyline (distance lines)
+  let selectedClientId = null;
+  let currentShapePlacement = null;
+
+  // helper: add id to group array and redraw group line
+  function addToGroup(groupId, internalId) {
+    if (!groupId) return;
+    if (!groupPins[groupId]) groupPins[groupId] = [];
+    if (!groupPins[groupId].includes(internalId)) {
+      groupPins[groupId].push(internalId);
+      redrawGroupLine(groupId);
+    }
+  }
+  // helper: remove id from group and redraw or remove
+  function removeFromGroup(groupId, internalId) {
+    if (!groupId || !groupPins[groupId]) return;
+    groupPins[groupId] = groupPins[groupId].filter(x => x !== internalId);
+    if (groupPins[groupId].length < 2) {
+      // remove polyline if exists
+      if (groupLines[groupId]) { try { map.removeLayer(groupLines[groupId]); } catch(e){} delete groupLines[groupId]; }
+      if (groupPins[groupId].length === 0) delete groupPins[groupId];
+    } else {
+      redrawGroupLine(groupId);
+    }
+  }
+  // actually build/replace the polyline for a group (in insertion order)
+  function redrawGroupLine(groupId) {
+    if (!groupPins[groupId] || groupPins[groupId].length < 2) {
+      if (groupLines[groupId]) { try { map.removeLayer(groupLines[groupId]); } catch(e){} delete groupLines[groupId]; }
+      return;
+    }
+    // gather latlngs in stored order; skip pins that are missing (but keep order)
+    const latlngs = [];
+    let lineColor = null;
+    for (const internalId of groupPins[groupId]) {
+      const p = pins[internalId];
+      if (!p || !p.marker || typeof p.marker.getLatLng !== 'function') continue;
+      const ll = p.marker.getLatLng();
+      latlngs.push([ll.lat, ll.lng]);
+      if (!lineColor && p.pinColor) lineColor = p.pinColor;
+    }
+    if (latlngs.length < 2) {
+      if (groupLines[groupId]) { try { map.removeLayer(groupLines[groupId]); } catch(e){} delete groupLines[groupId]; }
+      return;
+    }
+    // remove old
+    if (groupLines[groupId]) { try { map.removeLayer(groupLines[groupId]); } catch(e){} delete groupLines[groupId]; }
+    // dotted style
+    const poly = L.polyline(latlngs, { color: lineColor || '#333', weight:2, opacity:0.9, dashArray: '6,6' }).addTo(map);
+    groupLines[groupId] = poly;
   }
 
   // --- Host start ---
@@ -572,7 +538,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // RF toggle - ensure mutual exclusivity
-  rfBtn.addEventListener('click', ()=> {
+  const rfBtn = document.getElementById('rf-toggle-btn');
+  let isRFMode = false;
+  rfBtn && rfBtn.addEventListener('click', ()=> {
     isRFMode = !isRFMode;
     if (isRFMode) {
       isPinMode = false;
@@ -585,7 +553,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Clear
-  clearBtn.addEventListener('click', () => {
+  clearBtn && clearBtn.addEventListener('click', () => {
     if (!socket) return;
     if (isHost) {
       socket.emit('clearAll');
@@ -596,10 +564,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // --- Generate ID button logic ---
+  // Generate ID
+  const generateBtn = document.getElementById('generate-ID-btn');
   generateBtn && generateBtn.addEventListener('click', () => {
     const mode = isPinMode ? 'pin' : (isRFMode ? 'rf' : 'pin');
-
     function makeNextId(prefix, startNum=100) {
       let current;
       if (prefix === 'pin') current = currentPinGroupId;
@@ -612,7 +580,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!usedGroupIds.has(candidate)) return candidate;
       } while (true);
     }
-
     if (mode === 'pin') {
       const newId = makeNextId('pin', 100);
       currentPinGroupId = newId;
@@ -629,8 +596,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   // --- init app and socket handlers ---
   function initApp(url, hostFlag=false, clientName=null, colors=null) {
     serverUrl = url; isHost = hostFlag;
-
-    // ensure overlay UI is present (only one)
     ensureOverlayUI();
 
     if (!map) {
@@ -638,7 +603,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       const tileTemplate = `${serverUrl.replace(/\/$/, '')}/tiles/{z}/{x}/{y}.png`;
       L.tileLayer(tileTemplate, { minZoom:0, maxZoom:18, attribution:'© Local Tiles' }).addTo(map);
 
-      // handle clicks: use a unique placement id for each click; groupId is the selected group
       map.on('click', e => {
         if (currentShapePlacement && isHost) {
           openShapePopupAt(currentShapePlacement, e.latlng);
@@ -657,7 +621,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       setTimeout(()=>map.invalidateSize(),150);
     } else setTimeout(()=>map.invalidateSize(),150);
 
-    // socket setup
     socket = io(serverUrl, { query: { isHost: hostFlag ? 'true' : 'false' } });
     socket.on('connect', () => {
       showStatus('Connected to server');
@@ -671,11 +634,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     });
 
-    // Chat socket listeners
+    // Chat handlers (same as before — server sets name and fromHost)
     socket.on('chatHistory', history => {
       if (!Array.isArray(history)) return;
       if (chatMessages) chatMessages.innerHTML = '';
-      if (typeof systemChat !== 'undefined' && systemChat.messages) systemChat.messages.innerHTML = '';
       history.forEach(m => {
         if (m && m.id && sentChatIds.has(m.id)) {
           sentChatIds.delete(m.id);
@@ -692,7 +654,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         else if (typeof appendChatMessageFallback === 'function') appendChatMessageFallback(m, { skipScroll: true });
       });
       if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
-      if (typeof systemChat !== 'undefined' && systemChat.messages) systemChat.messages.scrollTop = systemChat.messages.scrollHeight;
     });
 
     socket.on('chatMessage', m => {
@@ -708,7 +669,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         sentChatIds.delete(matchedId);
         return;
       }
-      // ensure display name is provided to clients: server sends 'name'
       if (typeof appendChatMessage === 'function') appendChatMessage(m);
       else if (typeof appendChatMessageFallback === 'function') appendChatMessageFallback(m);
     });
@@ -734,14 +694,27 @@ document.addEventListener('DOMContentLoaded', async () => {
       serverPanel.appendChild(allBtn);
     });
 
-    // pins events: server should include groupId in the broadcast payload
+    // pins: IMPORTANT visibility logic below
     socket.on('pinAdded', d => {
-      const pinId = `${d.clientId}_${d.id}`; // internal key is clientId + placementId
+      // d: { id, groupId, lat, lon, clientId, clientName, pinColor, rf }
+      // internal id is clientId + '_' + id (server placement ID)
+      const pinId = `${d.clientId}_${d.id}`;
+
+      // VISIBILITY RULE:
+      // - Host: receives and displays all pins
+      // - Client: only display if it's their own pin
+      if (!isHost && socket && socket.id && d.clientId !== socket.id) {
+        // not the host and not this client's pin -> ignore (so other clients' pins are hidden)
+        return;
+      }
+
       addPin(pinId, d.lat, d.lon, d.clientName, d.clientId, d.pinColor, !!d.rf, d.groupId || null);
-      // render overlay entry exactly once here (pins container)
+
+      // create overlay entry (but addPin will not create overlays entry itself)
       const overlaysListEl = overlaysContainer.querySelector('#overlay-pins');
       if (overlaysListEl) renderOverlayEntry(pinId, d.lat, d.lon, d.rf ? 'RF' : 'Pin');
     });
+
     socket.on('pinRemoved', d => {
       const pinId = `${d.clientId}_${d.id}`;
       removePin(pinId);
@@ -777,7 +750,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (!isHost) placeUserDot(L.latLng(d.lat, d.lon), false, d.clientName, d.userDotColor);
     });
 
-    // shapes sync
+    // shapes
     socket.on('shapesUpdated', sArr => { sArr.forEach(s => addShapeLocal(s, false)); });
     socket.on('shapeAdded', s => addShapeLocal(s, false));
     socket.on('shapeUpdated', s => addShapeLocal(s, true));
@@ -792,7 +765,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // --- Host shape controls & placement (unchanged) ---
+  // --- Shapes logic (unchanged) ---
   function createHostShapeButtons() {
     if (document.getElementById('host-shape-controls')) return;
     const wrap = document.createElement('div');
@@ -869,6 +842,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     };
   }
 
+  const shapes = {};
   function addShapeLocal(shape, isUpdate) {
     if (!shape || !shape.id) return;
     if (shapes[shape.id] && !isUpdate) return;
@@ -927,11 +901,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       map.closePopup(popup);
     };
   }
-
   function renderShapesList() {
     const shapesRoot = overlaysContainer.querySelector('#overlay-shapes');
     if (!shapesRoot) return;
-    // clear previous shape entries (avoid duplicates)
     Array.from(shapesRoot.querySelectorAll('.shape-entry')).forEach(el => el.remove());
 
     const shapeEntries = Object.values(shapes).map(sobj => sobj.meta).sort((a,b) => (a.createdAt||0) - (b.createdAt||0));
@@ -954,16 +926,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // --- Pins ---
   function addPin(id, lat, lon, clientName, clientId, pinColor, isRF=false, groupId=null) {
-    if (pins[id]) return; // internal placements are unique; ignore duplicates
-
+    if (pins[id]) return; // prevent duplicates
     const icon = buildMarkerIcon(pinColor || '#ff4d4f');
     const marker = L.marker([lat, lon], { icon }).addTo(map);
     let radiusCircle = null;
 
-    // store rf flag and groupId on the pin object (groupId is user-visible)
     pins[id] = { marker, radiusCircle, elevation:0, bearing:0, clientId, clientName, pinColor, rf: !!isRF, groupId: groupId || null };
 
-    // Hover tooltip
+    // tooltip
     const latText = Number(lat).toFixed(6);
     const lonText = Number(lon).toFixed(6);
     let tooltipHtml = `Lat: ${latText}<br/>Lon: ${lonText}`;
@@ -973,16 +943,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     marker.bindTooltip(tooltipHtml, { direction: 'top', offset: [0, -10], permanent: false, sticky: true });
-
     marker.on('mouseover', () => { try { marker.openTooltip(); } catch(e){} });
     marker.on('mouseout', () => { try { marker.closeTooltip(); } catch(e){} });
-
     marker.on('click', ()=> showRadiusPopup(id));
 
     renderSidebarEntry(id);
 
-    // NOTE: do NOT create overlays-list entry here; server or local overlay creator is responsible so we avoid duplicates.
+    // Add to group polylines (in insertion order)
+    if (pins[id].groupId) addToGroup(pins[id].groupId, id);
 
+    // If this viewer is filtering clients, hide markers not of selected client
     if (selectedClientId && clientId !== selectedClientId) marker.setOpacity(0);
     updateLines();
   }
@@ -1020,7 +990,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const p = pins[id]; if (!p) return;
     p.elevation = elevation;
     renderSidebarEntry(id);
-    // also update overlays list entry if present
     const ov = overlaysContainer.querySelector(`#overlay-pins div[data-id="${id}"]`);
     if (ov) {
       const inp = ov.querySelector('.ov-elev');
@@ -1041,18 +1010,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function removePin(id) {
     const p = pins[id]; if (!p) return;
+    // remove from group first
+    if (p.groupId) removeFromGroup(p.groupId, id);
+
     if (p.marker) try { map.removeLayer(p.marker); } catch(e){}
     if (p.radiusCircle) try { map.removeLayer(p.radiusCircle); } catch(e){}
     if (lines[id]) { try { map.removeLayer(lines[id]); } catch(e){} delete lines[id]; }
     delete pins[id];
     const li = sidebar.querySelector(`li[data-id="${id}"]`); if (li) li.remove();
-    // also try to remove any overlays-list entry for this id if present
     const el = overlaysContainer.querySelector(`#overlay-pins div[data-id="${id}"]`);
     if (el) el.remove();
     updateLines();
   }
 
-  // --- Sidebar entry: delete + elevation/bearing edits + clickable highlight ---
+  // --- Sidebar entry --- (unchanged except group id visible)
   function renderSidebarEntry(id) {
     const p = pins[id];
     if (!p) return;
@@ -1064,7 +1035,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       sidebar.appendChild(li);
     }
 
-    const visibleId = p.groupId ? escapeHtml(p.groupId) : ''; // if empty, we don't show id
+    const visibleId = p.groupId ? escapeHtml(p.groupId) : '';
     const rfBadge = p.rf ? `<span style="background:#e6ffed;color:#064e2e;padding:2px 6px;border-radius:6px;font-size:11px;margin-left:8px">RF</span>` : '';
 
     li.innerHTML = `
@@ -1099,7 +1070,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const delBtn = li.querySelector('.delete-btn');
     if (delBtn) {
       delBtn.onclick = (ev) => {
-        ev.stopPropagation(); // prevent highlight when deleting
+        ev.stopPropagation();
         const parts = id.split('_');
         const owner = parts[0];
         const orig = parts.slice(1).join('_');
@@ -1159,7 +1130,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // --- Visual highlight + pan/zoom helper ---
+  // highlight pin (visual)
   function highlightPin(id) {
     const p = pins[id];
     if (!p || !p.marker || !p.marker.getLatLng) return;
@@ -1183,7 +1154,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // --- Lines rendering (host and client) ---
+  // --- Lines rendering for user-dot -> pins (unchanged) ---
   function updateLines() {
     for (const k in lines) { try { map.removeLayer(lines[k]); } catch(e){} delete lines[k]; }
     const LINE_COLOR = '#ff4d4f';
@@ -1240,6 +1211,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   function clearClientData(clientId) {
     Object.entries(pins).forEach(([key,p]) => {
       if (p.clientId === clientId) {
+        if (p.groupId) removeFromGroup(p.groupId, key);
         try { if (p.marker) map.removeLayer(p.marker); } catch(e){}
         try { if (p.radiusCircle) map.removeLayer(p.radiusCircle); } catch(e){}
         if (lines[key]) { try { map.removeLayer(lines[key]); } catch(e){} delete lines[key]; }
@@ -1268,6 +1240,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     // re-insert overlays container after clearing
     if (isHost) { sidebar.appendChild(overlaysContainer); renderShapesList(); }
     selectedClientId = null;
+    // clear groups & group lines
+    Object.keys(groupLines).forEach(g => { try { map.removeLayer(groupLines[g]); } catch(e){} });
+    Object.keys(groupLines).forEach(k => delete groupLines[k]);
+    Object.keys(groupPins).forEach(k => delete groupPins[k]);
     updateLines();
   }
 
@@ -1288,6 +1264,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       else dot.setStyle({ opacity:0, fillOpacity:0 });
     });
     for (const k in lines) { try { map.removeLayer(lines[k]); } catch(e){} delete lines[k]; }
+    // also hide groupLines not related to selected client (groupLines belong to pins the viewer has)
+    Object.entries(groupLines).forEach(([gId, poly]) => {
+      // If this viewer (non-host) has fewer than 2 accessible pins for this group, remove poly
+      if (!isHost) {
+        const accessibleCount = (groupPins[gId] || []).filter(id => id.startsWith(socket.id)).length;
+        if (accessibleCount < 2) {
+          try { map.removeLayer(poly); } catch(e){} delete groupLines[gId];
+        }
+      }
+    });
     updateLines();
   }
 
@@ -1304,22 +1290,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateLines();
   }
 
-  // --- Helpers ---
+  // --- misc helpers ---
   function showStatus(msg) { statusBar.textContent = msg; statusBar.classList.add('show'); setTimeout(()=>statusBar.classList.remove('show'),2200); }
 
+  // Load persisted pins (if you keep this) - treat as local overlay pins and also attach them to groups if they have group stored
   function loadSavedPins() {
     const saved = JSON.parse(localStorage.getItem('pins')||'{}');
     for (const id in saved) {
       const s = saved[id];
-      addPin(id, s.lat, s.lon);
+      addPin(id, s.lat, s.lon, s.clientName||'Saved', s.clientId||'local', s.pinColor||'#ff4d4f', !!s.rf, s.groupId || null);
       if (s.radius) applyRemoteRadius(id, s.radius);
       if (s.elevation) applyRemoteElevation(id, s.elevation);
       if (s.bearing) applyRemoteBearing(id, s.bearing);
-      // saved pins are considered overlay entries for local view
       const pinsContainer = overlaysContainer.querySelector('#overlay-pins');
       if (pinsContainer) renderOverlayEntry(id, s.lat, s.lon, 'Saved');
     }
   }
   loadSavedPins();
 
-}); // end DOMContentLoaded
+}); // DOMContentLoaded end
