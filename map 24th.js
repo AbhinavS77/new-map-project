@@ -1,11 +1,9 @@
-// map.js (updated: host-box placement with yellow default + radius input, contextmenu color change)
-// Added zoom behavior: minZoom=3, maxZoom=15, tiles only available up to native zoom 10 (11-15 scale level-10).
+// map.js (updated) - group polylines (dotted) + host/client visibility + single-overlay enforcement
 
 // --- Shared ID state (user-visible group IDs) ---
 let currentPinGroupId = "pin-101";   // all normal pins use this until regenerated
 let currentRfGroupId  = "rf-201";    // all RF pins use this until regenerated
 const usedGroupIds = new Set([currentPinGroupId, currentRfGroupId]); // prevent duplicates
-const groupCounters = { [currentPinGroupId]: 0, [currentRfGroupId]: 0 };
 
 // --- Group bookkeeping: pins grouped by groupId, and polylines per group ---
 const groupPins = {};   // groupId -> array of internal pin ids (in insertion order)
@@ -28,23 +26,11 @@ function createSvgIconDataUrl(hexColor='#ff4d4f', size=[24,38]) {
   </svg>`;
   return 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg);
 }
-function buildLabeledDivIcon(subId, pinColor, fontSize = 12) {
-  const svgUrl = createSvgIconDataUrl(pinColor || '#ff4d4f', [30,45]);
-  const labelHtml = subId ? escapeHtml(String(subId)) : '';
-  const html = `
-    <div style="position:relative; width:30px; height:60px; pointer-events:auto; display:inline-block;">
-      <div style="position:absolute; left:50%; bottom:calc(100% + 4px); transform:translateX(-50%); font-weight:700; font-size:${fontSize}px; color:#000; white-space:nowrap; pointer-events:none;">
-        ${labelHtml}
-      </div>
-      <img src="${svgUrl}" style="position:absolute; left:50%; bottom:0; transform:translateX(-50%); width:30px; height:45px; display:block;" />
-    </div>`;
-  return L.divIcon({ html, className: 'labeled-marker-icon', iconSize: [30, 60], iconAnchor: [15, 40], popupAnchor: [0, -40] });
-}
 function buildMarkerIcon(pinColor) {
   const ICON_SIZE = [30, 45];
-  const ICON_BOTTOM_PADDING = -100;
+  const ICON_BOTTOM_PADDING = -24;
   const svgUrl = createSvgIconDataUrl(pinColor);
-  const anchorY = ICON_SIZE[1];
+  const anchorY = ICON_SIZE[1] + ICON_BOTTOM_PADDING;
   return L.icon({
     iconUrl: svgUrl,
     iconSize: ICON_SIZE,
@@ -148,7 +134,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (typeof appendChatMessage === 'function') {
       appendChatMessage(Object.assign({}, msg, { clientName: (clientNameInput && clientNameInput.value) || 'You', fromHost: !!isHost }));
-    } else if (typeof appendChatMessageFallback === 'function') {
+    } else {
       appendChatMessageFallback(Object.assign({}, msg, { clientName: (clientNameInput && clientNameInput.value) || 'You', fromHost: !!isHost }));
     }
 
@@ -237,7 +223,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     #overlays-container .btn.danger { background:#ef4444; color:#fff; border:none; }
     #overlays-container .btn.secondary { background:#f8fafc; }
     .shape-entry { }
-    .labeled-marker-icon img { pointer-events:auto; }  /* allow marker interactions */
   `;
   document.head.appendChild(_hlStyle);
 
@@ -271,7 +256,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     content.dataset.id = internalId;
     content.innerHTML = `
       <div class="left">
-        <div style="font-weight:700">${escapeHtml(p && p.subId ? p.subId : title)}</div>
+        <div style="font-weight:700">${escapeHtml(title)}</div>
         <div class="meta">Lat:${Number(lat).toFixed(6)}, Lon:${Number(lon).toFixed(6)}</div>
         <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
           <label style="font-size:13px">Elevation:</label>
@@ -295,13 +280,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     content.querySelector('.overlay-show').onclick = () => {
       const pinObj = pins[internalId];
       if (pinObj && pinObj.marker) {
-        // avoid forcing zoom over native tile zoom; cap programmatic show-zoom to 10
-        const targetZoom = map ? Math.max(map.getZoom(), 10) : 10;
-        map.setView(pinObj.marker.getLatLng(), targetZoom, { animate: true });
+        map.setView(pinObj.marker.getLatLng(), Math.max(map.getZoom(), 12), { animate: true });
         showRadiusPopup(internalId);
-      } else if (pinObj) {
-        const targetZoom = map ? Math.max(map.getZoom(), 10) : 10;
-        map.setView([pinObj.lat, pinObj.lon], targetZoom, { animate: true });
       }
     };
     content.querySelector('.overlay-del').onclick = () => {
@@ -388,20 +368,22 @@ document.addEventListener('DOMContentLoaded', async () => {
           return;
         }
 
+        // Host: broadcast server-style so all clients (host + their own clients) get correct behaviour.
         if (isHost && socket && socket.connected) {
           const placementId = Date.now().toString() + '_' + Math.random().toString(36).slice(2,7);
           const color = pinColorInput && pinColorInput.value ? pinColorInput.value : '#ff4d4f';
           socket.emit('newPin', { id: placementId, groupId: currentPinGroupId, lat: lat, lon: lon, pinColor: color, rf: false });
-          // programmatic center: cap to zoom 10 for consistency with native tiles
-          map.setView([lat, lon], Math.max(map.getZoom(), 10), { animate: true });
+          map.setView([lat, lon], Math.max(map.getZoom(), 12), { animate: true });
           showStatus(`Pinned (broadcast) at ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
+          // overlay entry will be created when server echoes 'pinAdded' (socket.on('pinAdded'))
           return;
         }
 
+        // fallback: local overlay pin (client offline / non-host)
         const internalId = `overlay_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,6)}`;
         const ownerClientId = (socket && socket.id) ? socket.id : 'local';
-        addPin(internalId, lat, lon, (clientNameInput && clientNameInput.value) || 'Local', ownerClientId, '#ff4d4f', false, null, null);
-        map.setView([lat, lon], Math.max(map.getZoom(), 10), { animate: true });
+        addPin(internalId, lat, lon, (clientNameInput && clientNameInput.value) || 'Local', ownerClientId, '#ff4d4f', false, null);
+        map.setView([lat, lon], Math.max(map.getZoom(), 12), { animate: true });
         renderOverlayEntry(internalId, lat, lon, 'Pin');
         showStatus(`Pinned at ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
       });
@@ -455,61 +437,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   let selectedClientId = null;
   let currentShapePlacement = null;
 
-  // helper: extract numeric base from group id "pin-101" -> "101"
-  function getGroupDisplayBase(groupId) {
-    if (!groupId) return '';
-    const m = String(groupId).match(/-(\d+)$/);
-    return m ? m[1] : String(groupId);
-  }
-
-  // helper: compute font size from map zoom (tweak mapping as desired)
-  // IMPORTANT: clamp zoom for label sizing so zoom > 10 doesn't increase label size
-  function fontSizeForZoom(z) {
-    if (typeof z === 'undefined' || z === null) z = 5;
-    const zClamped = Math.max(3, Math.min(10, z)); // clamp to 3..10 for sizing
-    const size = Math.round(10 + Math.max(0, Math.min(6, (zClamped - 3) * 0.6)));
-    return Math.max(10, Math.min(16, size));
-  }
-
-  // refresh all labeled icons to reflect current zoom
-  function refreshLabelIcons() {
-    if (!map) return;
-    const fs = fontSizeForZoom(map.getZoom());
-    Object.entries(pins).forEach(([id,p]) => {
-      if (!p) return;
-      if (p.marker && p.marker.setIcon) {
-        try {
-          const label = p.subId || (p.groupId ? getGroupDisplayBase(p.groupId) + '.?' : '');
-          p.marker.setIcon(buildLabeledDivIcon(label, p.pinColor || '#ff4d4f', fs));
-        } catch (e) { /* ignore */ }
-      }
-    });
-  }
-
   // helper: add id to group array and redraw group line
   function addToGroup(groupId, internalId) {
     if (!groupId) return;
     if (!groupPins[groupId]) groupPins[groupId] = [];
     if (!groupPins[groupId].includes(internalId)) {
       groupPins[groupId].push(internalId);
-
-      // ARCHIVE: keep at most 5 visible pins on map for each group
-      const MAX_VISIBLE = 5;
-      while (groupPins[groupId].length > MAX_VISIBLE) {
-        const firstId = groupPins[groupId].shift();
-        const firstPin = pins[firstId];
-        if (firstPin) {
-          firstPin.archived = true;
-          try { if (firstPin.marker) map.removeLayer(firstPin.marker); } catch(e){}
-          firstPin.marker = null;
-          try { if (firstPin.radiusCircle) map.removeLayer(firstPin.radiusCircle); } catch(e){}
-          firstPin.radiusCircle = null;
-          if (lines[firstId]) { try { map.removeLayer(lines[firstId]); } catch(e){} delete lines[firstId]; }
-          renderSidebarEntry(firstId);
-          renderOverlayEntry(firstId, firstPin.lat, firstPin.lon, firstPin.rf ? 'RF' : 'Pin');
-        }
-      }
-
       redrawGroupLine(groupId);
     }
   }
@@ -518,6 +451,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!groupId || !groupPins[groupId]) return;
     groupPins[groupId] = groupPins[groupId].filter(x => x !== internalId);
     if (groupPins[groupId].length < 2) {
+      // remove polyline if exists
       if (groupLines[groupId]) { try { map.removeLayer(groupLines[groupId]); } catch(e){} delete groupLines[groupId]; }
       if (groupPins[groupId].length === 0) delete groupPins[groupId];
     } else {
@@ -530,6 +464,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (groupLines[groupId]) { try { map.removeLayer(groupLines[groupId]); } catch(e){} delete groupLines[groupId]; }
       return;
     }
+    // gather latlngs in stored order; skip pins that are missing (but keep order)
     const latlngs = [];
     let lineColor = null;
     for (const internalId of groupPins[groupId]) {
@@ -543,7 +478,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (groupLines[groupId]) { try { map.removeLayer(groupLines[groupId]); } catch(e){} delete groupLines[groupId]; }
       return;
     }
+    // remove old
     if (groupLines[groupId]) { try { map.removeLayer(groupLines[groupId]); } catch(e){} delete groupLines[groupId]; }
+    // dotted style
     const poly = L.polyline(latlngs, { color: lineColor || '#333', weight:2, opacity:0.9, dashArray: '6,6' }).addTo(map);
     groupLines[groupId] = poly;
   }
@@ -647,13 +584,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       const newId = makeNextId('pin', 100);
       currentPinGroupId = newId;
       usedGroupIds.add(newId);
-      groupCounters[newId] = 0;
       showStatus(`New Pin group ID: ${newId}`);
     } else {
       const newId = makeNextId('rf', 200);
       currentRfGroupId = newId;
       usedGroupIds.add(newId);
-      groupCounters[newId] = 0;
       showStatus(`New RF group ID: ${newId}`);
     }
   });
@@ -664,19 +599,29 @@ document.addEventListener('DOMContentLoaded', async () => {
     ensureOverlayUI();
 
     if (!map) {
-      // Map init: minZoom 3, maxZoom 15, but tiles are only native up to zoom 10.
-      map = L.map('map', {
-        minZoom: 3,
-        maxZoom: 15,
-      }).setView([20.5937,78.9629], 5);
+      // Tiles exist up to z=10 on disk, but allow map zoom to 15 (Leaflet will upscale z=10 tiles)
+      const MAX_NATIVE_ZOOM = 10;   // you have folders 0..10
+      const MAX_MAP_ZOOM    = 15;   // allow user to zoom in to 15 (upscaling beyond native)
+      const MIN_ZOOM        = 1;
 
-      // tileTemplate server - tile layer uses maxNativeZoom=10 so zoom 11-15 are scaled level-10 tiles
+      map = L.map('map', {
+        minZoom: MIN_ZOOM,
+        maxZoom: MAX_MAP_ZOOM,
+        // optional: adjust these to your taste:
+        zoomControl: true,
+        preferCanvas: false
+      }).setView([20.5937, 78.9629], 5);
+
       const tileTemplate = `${serverUrl.replace(/\/$/, '')}/tiles/{z}/{x}/{y}.png`;
+
       L.tileLayer(tileTemplate, {
-        minZoom: 3,
-        maxZoom: 15,
-        maxNativeZoom: 10, // <- this makes 11-15 scale the z=10 tiles
-        attribution:'© Local Tiles'
+        minZoom: MIN_ZOOM,
+        maxNativeZoom: MAX_NATIVE_ZOOM, // tells Leaflet that real tiles stop at z=10
+        maxZoom: MAX_MAP_ZOOM,          // allow the map to zoom to 15 (z10 tiles will be upscaled)
+        attribution: '© Local Tiles',
+        noWrap: false,
+        // optional: reduce requests for ultra-high zooms on mobile retina if you don't have high-res tiles
+        // detectRetina: false
       }).addTo(map);
 
       map.on('click', e => {
@@ -693,9 +638,6 @@ document.addEventListener('DOMContentLoaded', async () => {
           socket && socket.emit('newPin', { id: placementId, groupId: currentPinGroupId, lat: e.latlng.lat, lon: e.latlng.lng });
         }
       });
-
-      // update labels on zooming
-      map.on('zoomend', () => refreshLabelIcons());
 
       setTimeout(()=>map.invalidateSize(),150);
     } else setTimeout(()=>map.invalidateSize(),150);
@@ -776,17 +718,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     // pins: IMPORTANT visibility logic below
     socket.on('pinAdded', d => {
       // d: { id, groupId, lat, lon, clientId, clientName, pinColor, rf }
+      // internal id is clientId + '_' + id (server placement ID)
       const pinId = `${d.clientId}_${d.id}`;
 
       // VISIBILITY RULE:
       // - Host: receives and displays all pins
       // - Client: only display if it's their own pin
       if (!isHost && socket && socket.id && d.clientId !== socket.id) {
+        // not the host and not this client's pin -> ignore (so other clients' pins are hidden)
         return;
       }
 
-      addPin(pinId, d.lat, d.lon, d.clientName, d.clientId, d.pinColor, !!d.rf, d.groupId || null, null);
+      addPin(pinId, d.lat, d.lon, d.clientName, d.clientId, d.pinColor, !!d.rf, d.groupId || null);
 
+      // create overlay entry (but addPin will not create overlays entry itself)
       const overlaysListEl = overlaysContainer.querySelector('#overlay-pins');
       if (overlaysListEl) renderOverlayEntry(pinId, d.lat, d.lon, d.rf ? 'RF' : 'Pin');
     });
@@ -816,10 +761,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (isHost) {
         if (userDots[d.clientId]) { try { map.removeLayer(userDots[d.clientId]); } catch(e){} delete userDots[d.clientId]; }
         const dot = L.circleMarker([d.lat, d.lon], { radius:8, color:'#fff', weight:3, fillColor:d.userDotColor||'#1e88e5', fillOpacity:1 }).addTo(map);
-        dot.clientId = d.clientId;
-        dot.bindTooltip(`${escapeHtml(d.clientName||'User')}<br/>Lat: ${Number(d.lat).toFixed(6)}<br/>Lon: ${Number(d.lon).toFixed(6)}`, { direction:'top' });
-        dot.on('mouseover', ()=> { try { dot.openTooltip(); } catch(e){} });
-        dot.on('mouseout', ()=> { try { dot.closeTooltip(); } catch(e){} });
+        dot.clientId = d.clientId; dot.bindTooltip(d.clientName, { direction:'top' });
         userDots[d.clientId] = dot;
         if (selectedClientId && selectedClientId !== d.clientId) dot.setStyle({ opacity:0, fillOpacity:0 });
         updateLines();
@@ -828,36 +770,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     socket.on('userDotPlacedAck', d => {
       if (!isHost) placeUserDot(L.latLng(d.lat, d.lon), false, d.clientName, d.userDotColor);
     });
-
-    // socket.on('subIdAssigned', d => {
-    //   if (!d || !d.clientId || !d.id || !d.subId) return;
-    //   const pinId = `${d.clientId}_${d.id}`;
-    //   const p = pins[pinId];
-    //   if (p) {
-    //     p.subId = d.subId;
-    //     if (p.marker && p.marker.setIcon) {
-    //       try { p.marker.setIcon(buildLabeledDivIcon(d.subId, p.pinColor || '#ff4d4f', fontSizeForZoom(map.getZoom()))); } catch(e) {}
-    //     }
-    //     renderSidebarEntry(pinId);
-    //   }
-    // });
-
-socket.on('subIdAssigned', d => {
-  if (!d || !d.clientId || !d.id || !d.subId) return;
-  const pinId = `${d.clientId}_${d.id}`;
-  const p = pins[pinId];
-  if (p) {
-    p.subId = d.subId;
-    const currentZoom = (map && typeof map.getZoom === 'function') ? map.getZoom() : 5;
-    const fs = fontSizeForZoom(currentZoom);
-    if (p.marker && p.marker.setIcon) {
-      try { p.marker.setIcon(buildLabeledDivIcon(d.subId, p.pinColor || '#ff4d4f', fs)); } catch(e) {}
-    }
-    renderSidebarEntry(pinId);
-    try { renderOverlayEntry(pinId, p.lat, p.lon, p.rf ? 'RF' : 'Pin'); } catch(e) {}
-  }
-});
-
 
     // shapes
     socket.on('shapesUpdated', sArr => { sArr.forEach(s => addShapeLocal(s, false)); });
@@ -874,7 +786,7 @@ socket.on('subIdAssigned', d => {
     });
   }
 
-  // --- Shapes logic (unchanged except added contextmenu color UI for boxes) ---
+  // --- Shapes logic (unchanged) ---
   function createHostShapeButtons() {
     if (document.getElementById('host-shape-controls')) return;
     const wrap = document.createElement('div');
@@ -918,14 +830,12 @@ socket.on('subIdAssigned', d => {
     html += `<div style="display:flex;gap:8px;justify-content:flex-end"><button id="shape-cancel" class="btn">Cancel</button><button id="shape-ok" class="btn" style="background:#1e88e5;color:#fff">Add</button></div>`;
     html += `</div>`;
     popup.setContent(html).openOn(map);
-
     document.getElementById('shape-cancel').onclick = () => {
       map.closePopup(popup);
       currentShapePlacement = null;
       const wrap = document.getElementById('host-shape-controls');
       if (wrap) Array.from(wrap.querySelectorAll('button')).forEach(x => x.style.background = '#fff');
     };
-
     document.getElementById('shape-ok').onclick = () => {
       const r = parseFloat(document.getElementById('shape-radius').value) || 0;
       let bearing = 0, spread = 60;
@@ -934,8 +844,7 @@ socket.on('subIdAssigned', d => {
         spread = parseFloat(document.getElementById('shape-spread').value) || 60;
       }
       const id = `shape_${Date.now()}`;
-      // default color logic: for box -> yellow as requested; others random pastel
-      const color = (type === 'box') ? '#FFEB3B' : randomPastel();
+      const color = randomPastel();
       const shapeObj = {
         id, type,
         lat: latlng.lat, lon: latlng.lng,
@@ -955,52 +864,10 @@ socket.on('subIdAssigned', d => {
   }
 
   const shapes = {};
-
-  // helper: open color chooser popup for box markers (host only)
-  function openBoxColorPopup(shapeMeta, marker, overlay) {
-    if (!shapeMeta || !marker) return;
-    const latlng = marker.getLatLng ? marker.getLatLng() : [shapeMeta.lat, shapeMeta.lon];
-    const popup = L.popup({ closeOnClick: true, autoClose: true }).setLatLng(latlng);
-    const html = `<div style="min-width:140px;padding:6px">
-      <div style="font-weight:700;margin-bottom:6px">Change color</div>
-      <div style="display:flex;gap:8px;justify-content:center">
-        <button id="color-red" class="btn" style="background:#ef4444;color:#fff">Red</button>
-        <button id="color-green" class="btn" style="background:#10b981;color:#fff">Green</button>
-      </div>
-    </div>`;
-    popup.setContent(html).openOn(map);
-
-    // event bindings
-    setTimeout(()=> {
-      const red = document.getElementById('color-red');
-      const green = document.getElementById('color-green');
-      if (red) red.onclick = () => {
-        try {
-          shapeMeta.color = '#ef4444';
-          if (overlay && overlay.setStyle) overlay.setStyle({ color: shapeMeta.color, fillColor: shapeMeta.color });
-          if (marker && marker.setIcon) marker.setIcon(buildShapeDivIcon(shapeMeta.type, shapeMeta.color));
-          socket && socket.emit('updateShape', Object.assign({}, shapeMeta));
-          map.closePopup(popup);
-        } catch(e){ console.warn(e); map.closePopup(popup); }
-      };
-      if (green) green.onclick = () => {
-        try {
-          shapeMeta.color = '#10b981';
-          if (overlay && overlay.setStyle) overlay.setStyle({ color: shapeMeta.color, fillColor: shapeMeta.color });
-          if (marker && marker.setIcon) marker.setIcon(buildShapeDivIcon(shapeMeta.type, shapeMeta.color));
-          socket && socket.emit('updateShape', Object.assign({}, shapeMeta));
-          map.closePopup(popup);
-        } catch(e){ console.warn(e); map.closePopup(popup); }
-      };
-    }, 20);
-  }
-
   function addShapeLocal(shape, isUpdate) {
     if (!shape || !shape.id) return;
     if (shapes[shape.id] && !isUpdate) return;
     if (shapes[shape.id]) removeShapeLocal(shape.id, true);
-
-    // create marker
     const marker = L.marker([shape.lat, shape.lon], { icon: buildShapeDivIcon(shape.type, shape.color) }).addTo(map);
     let overlay = null;
     if (shape.type === 'box' || shape.type === 'circle') {
@@ -1010,20 +877,10 @@ socket.on('subIdAssigned', d => {
       const arc = polygonPoints.slice(1);
       overlay = L.polygon([ [shape.lat, shape.lon], ...arc ], { color: shape.color, fillColor: shape.color, fillOpacity: 0.22, weight:2 }).addTo(map);
     }
-
-    // host edit behavior remains
     if (isHost) {
       marker.on('click', () => openHostEditShapePopup(shape));
       overlay && overlay.on('click', () => openHostEditShapePopup(shape));
-      // specifically for box: support right-click color chooser
-      if (shape.type === 'box') {
-        marker.on('contextmenu', (ev) => {
-          // open color chooser popup at marker
-          openBoxColorPopup(shape, marker, overlay);
-        });
-      }
     }
-
     shapes[shape.id] = { marker, overlay, meta: shape };
     renderShapesList();
   }
@@ -1079,7 +936,7 @@ socket.on('subIdAssigned', d => {
       div.innerHTML = `<div><div style="font-weight:700">${meta.type.toUpperCase()}</div><div style="font-size:12px;color:#6b7280">Lat:${meta.lat.toFixed(4)}, Lon:${meta.lon.toFixed(4)}</div></div>`;
       const btns = document.createElement('div');
       const showBtn = document.createElement('button'); showBtn.textContent='Show'; showBtn.className='btn';
-      showBtn.onclick = () => { map.setView([meta.lat, meta.lon], Math.max(map.getZoom(), 10)); showClientData(meta.clientId || null); };
+      showBtn.onclick = () => { map.setView([meta.lat, meta.lon], Math.max(map.getZoom(), 12)); showClientData(meta.clientId || null); };
       const editBtn = document.createElement('button'); editBtn.textContent='Edit'; editBtn.className='btn';
       editBtn.onclick = () => openHostEditShapePopup(meta);
       btns.appendChild(showBtn); btns.appendChild(editBtn);
@@ -1089,22 +946,20 @@ socket.on('subIdAssigned', d => {
   }
 
   // --- Pins ---
-  function addPin(id, lat, lon, clientName, clientId, pinColor, isRF=false, groupId=null, subId=null) {
+  function addPin(id, lat, lon, clientName, clientId, pinColor, isRF=false, groupId=null) {
     if (pins[id]) return; // prevent duplicates
-
-    const fs = map ? fontSizeForZoom(map.getZoom()) : 12;
-    const labelText = subId || (groupId ? getGroupDisplayBase(groupId) + '.?' : '');
-    const icon = buildLabeledDivIcon(labelText, pinColor || '#ff4d4f', fs);
+    const icon = buildMarkerIcon(pinColor || '#ff4d4f');
     const marker = L.marker([lat, lon], { icon }).addTo(map);
     let radiusCircle = null;
 
-    pins[id] = { marker, radiusCircle, elevation:0, bearing:0, clientId, clientName, pinColor, rf: !!isRF, groupId: groupId || null, lat, lon, archived:false, subId: subId || null };
+    pins[id] = { marker, radiusCircle, elevation:0, bearing:0, clientId, clientName, pinColor, rf: !!isRF, groupId: groupId || null };
 
+    // tooltip
     const latText = Number(lat).toFixed(6);
     const lonText = Number(lon).toFixed(6);
     let tooltipHtml = `Lat: ${latText}<br/>Lon: ${lonText}`;
     if (pins[id].groupId) {
-      const visibleIdText = escapeHtml(String(getGroupDisplayBase(pins[id].groupId)));
+      const visibleIdText = escapeHtml(String(pins[id].groupId));
       tooltipHtml = `ID: <strong>${visibleIdText}</strong><br/>` + tooltipHtml;
     }
 
@@ -1115,27 +970,12 @@ socket.on('subIdAssigned', d => {
 
     renderSidebarEntry(id);
 
+    // Add to group polylines (in insertion order)
     if (pins[id].groupId) addToGroup(pins[id].groupId, id);
 
+    // If this viewer is filtering clients, hide markers not of selected client
     if (selectedClientId && clientId !== selectedClientId) marker.setOpacity(0);
     updateLines();
-
-    if (isHost && pins[id].groupId && !pins[id].subId) {
-      const g = pins[id].groupId;
-      if (typeof groupCounters[g] === 'undefined') groupCounters[g] = 0;
-      groupCounters[g] = (groupCounters[g] || 0) + 1;
-      const assigned = `${getGroupDisplayBase(g)}.${groupCounters[g]}`;
-      pins[id].subId = assigned;
-      try { marker.setIcon(buildLabeledDivIcon(assigned, pinColor || '#ff4d4f', fs)); } catch(e) { console.warn('setIcon failed', e); }
-      renderSidebarEntry(id);
-      renderOverlayEntry(id, lat, lon, pins[id].rf ? 'RF' : 'Pin');
-
-      try {
-        const parts = id.split('_');
-        const orig = parts.slice(1).join('_');
-        socket && socket.emit('subIdAssigned', { clientId, id: orig, subId: assigned });
-      } catch(e) { console.warn('emit subIdAssigned failed', e); }
-    }
   }
 
   function showRadiusPopup(id) {
@@ -1191,6 +1031,7 @@ socket.on('subIdAssigned', d => {
 
   function removePin(id) {
     const p = pins[id]; if (!p) return;
+    // remove from group first
     if (p.groupId) removeFromGroup(p.groupId, id);
 
     if (p.marker) try { map.removeLayer(p.marker); } catch(e){}
@@ -1203,11 +1044,11 @@ socket.on('subIdAssigned', d => {
     updateLines();
   }
 
-  // --- Sidebar entry ---
+  // --- Sidebar entry --- (unchanged except group id visible)
   function renderSidebarEntry(id) {
     const p = pins[id];
     if (!p) return;
-    const latlng = p.marker && p.marker.getLatLng ? p.marker.getLatLng() : { lat: p.lat, lng: p.lon };
+    const latlng = p.marker.getLatLng();
     let li = sidebar.querySelector(`li[data-id="${id}"]`);
     if (!li) {
       li = document.createElement('li');
@@ -1215,15 +1056,14 @@ socket.on('subIdAssigned', d => {
       sidebar.appendChild(li);
     }
 
-    const visibleId = p.subId ? escapeHtml(p.subId) : (p.groupId ? escapeHtml(getGroupDisplayBase(p.groupId)) + '.?' : '');
+    const visibleId = p.groupId ? escapeHtml(p.groupId) : '';
     const rfBadge = p.rf ? `<span style="background:#e6ffed;color:#064e2e;padding:2px 6px;border-radius:6px;font-size:11px;margin-left:8px">RF</span>` : '';
-    const archivedBadge = p.archived ? `<span style="background:#f3f4f6;color:#6b7280;padding:2px 6px;border-radius:6px;font-size:11px;margin-left:8px">Archived</span>` : '';
 
     li.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div class="pin-info" style="cursor:pointer">
-          <div style="font-weight:700">${visibleId} ${rfBadge} ${archivedBadge}</div>
-          ${ p.groupId ? `<div style="font-size:12px;color:#6b7280">Parent: ${escapeHtml(getGroupDisplayBase(p.groupId))}</div>` : '' }
+          <div style="font-weight:700">${escapeHtml(p.clientName || p.clientId)} ${rfBadge}</div>
+          ${ visibleId ? `<div style="font-size:12px;color:#6b7280">ID: <strong>${visibleId}</strong></div>` : '' }
         </div>
         <button class="delete-btn" style="background:#ef4444;color:#fff;border:none;border-radius:6px;padding:4px 8px">&times;</button>
       </div>
@@ -1314,34 +1154,28 @@ socket.on('subIdAssigned', d => {
   // highlight pin (visual)
   function highlightPin(id) {
     const p = pins[id];
-    if (!p) return;
+    if (!p || !p.marker || !p.marker.getLatLng) return;
     try {
-      const latlng = (p.marker && p.marker.getLatLng) ? p.marker.getLatLng() : L.latLng(p.lat, p.lon);
-      // cap highlight zoom to 10 so we do not programmatically zoom into levels where tiles are scaled
-      const targetZoom = Math.max(map.getZoom(), 10);
+      const latlng = p.marker.getLatLng();
+      const targetZoom = Math.max(map.getZoom(), 15);
       map.setView(latlng, targetZoom, { animate: true });
 
       const popupContent = `Lat: ${latlng.lat.toFixed(4)}<br/>Lon: ${latlng.lng.toFixed(4)}`;
-      if (p.marker) {
-        p.marker.bindPopup(popupContent).openPopup();
+      p.marker.bindPopup(popupContent).openPopup();
 
-        const el = p.marker.getElement && p.marker.getElement();
-        if (el) {
-          el.classList.add('pin-highlight');
-          setTimeout(() => {
-            try { el.classList.remove('pin-highlight'); } catch(e){ }
-          }, 900);
-        }
-      } else {
-        const tmp = L.popup({ closeOnClick: true }).setLatLng(latlng).setContent(popupContent).openOn(map);
-        setTimeout(()=> { try { map.closePopup(tmp); } catch(e){} }, 1600);
+      const el = p.marker.getElement && p.marker.getElement();
+      if (el) {
+        el.classList.add('pin-highlight');
+        setTimeout(() => {
+          try { el.classList.remove('pin-highlight'); } catch(e){ }
+        }, 900);
       }
     } catch (err) {
       console.warn('highlightPin error', err);
     }
   }
 
-  // --- Lines rendering for user-dot -> pins (unchanged except robust checks) ---
+  // --- Lines rendering for user-dot -> pins (unchanged) ---
   function updateLines() {
     for (const k in lines) { try { map.removeLayer(lines[k]); } catch(e){} delete lines[k]; }
     const LINE_COLOR = '#ff4d4f';
@@ -1351,7 +1185,7 @@ socket.on('subIdAssigned', d => {
         if (selectedClientId && selectedClientId !== clientId) return;
         const dotLL = dot.getLatLng();
         Object.entries(pins).forEach(([pinId, pin]) => {
-          if (pin.clientId === clientId && pin.marker) {
+          if (pin.clientId === clientId) {
             const poly = L.polyline([dotLL, pin.marker.getLatLng()], { color: LINE_COLOR, weight:2, opacity:0.9 }).addTo(map);
             const dist = (dotLL.distanceTo(pin.marker.getLatLng())/1000).toFixed(2) + ' km';
             poly.bindTooltip(dist, { sticky:true });
@@ -1363,7 +1197,7 @@ socket.on('subIdAssigned', d => {
       if (!userMarker || !userMarker.getLatLng) return;
       const userLL = userMarker.getLatLng();
       Object.entries(pins).forEach(([pinId, pin]) => {
-        if (socket && pinId.startsWith(socket.id) && pin.marker) {
+        if (socket && pinId.startsWith(socket.id)) {
           const poly = L.polyline([userLL, pin.marker.getLatLng()], { color: LINE_COLOR, weight:2, opacity:0.9 }).addTo(map);
           const dist = (userLL.distanceTo(pin.marker.getLatLng())/1000).toFixed(2) + ' km';
           poly.bindTooltip(dist, { sticky:true });
@@ -1379,11 +1213,6 @@ socket.on('subIdAssigned', d => {
     const dotColor = userDotColor || '#1e88e5';
     const dot = L.circleMarker(latlng, { radius:8, color:'#fff', weight:3, fillColor:dotColor, fillOpacity:1 }).addTo(map);
     if (isHost) dot.bindTooltip(clientName, { direction:'top' });
-    const tooltipHtml = `${escapeHtml(clientName || 'You')}<br/>Lat: ${Number(latlng.lat).toFixed(6)}<br/>Lon: ${Number(latlng.lng).toFixed(6)}`;
-    dot.bindTooltip(tooltipHtml, { direction:'top' });
-    dot.on('mouseover', ()=> { try { dot.openTooltip(); } catch(e){} });
-    dot.on('mouseout', ()=> { try { dot.closeTooltip(); } catch(e){} });
-
     if (!isHost) userMarker = dot;
     dot.on('click', ()=> { dot.bindPopup(`Lat:${latlng.lat.toFixed(4)}<br>Lon:${latlng.lng.toFixed(4)}`).openPopup(); setTimeout(()=>dot.closePopup(),2000); });
     if (!isHost) {
@@ -1429,8 +1258,10 @@ socket.on('subIdAssigned', d => {
     Object.keys(shapes).forEach(sid => removeShapeLocal(sid, true));
     if (userMarker) { try { map.removeLayer(userMarker); } catch(e){} userMarker=null; }
     sidebar.innerHTML = '';
+    // re-insert overlays container after clearing
     if (isHost) { sidebar.appendChild(overlaysContainer); renderShapesList(); }
     selectedClientId = null;
+    // clear groups & group lines
     Object.keys(groupLines).forEach(g => { try { map.removeLayer(groupLines[g]); } catch(e){} });
     Object.keys(groupLines).forEach(k => delete groupLines[k]);
     Object.keys(groupPins).forEach(k => delete groupPins[k]);
@@ -1454,7 +1285,9 @@ socket.on('subIdAssigned', d => {
       else dot.setStyle({ opacity:0, fillOpacity:0 });
     });
     for (const k in lines) { try { map.removeLayer(lines[k]); } catch(e){} delete lines[k]; }
+    // also hide groupLines not related to selected client (groupLines belong to pins the viewer has)
     Object.entries(groupLines).forEach(([gId, poly]) => {
+      // If this viewer (non-host) has fewer than 2 accessible pins for this group, remove poly
       if (!isHost) {
         const accessibleCount = (groupPins[gId] || []).filter(id => id.startsWith(socket.id)).length;
         if (accessibleCount < 2) {
@@ -1486,7 +1319,7 @@ socket.on('subIdAssigned', d => {
     const saved = JSON.parse(localStorage.getItem('pins')||'{}');
     for (const id in saved) {
       const s = saved[id];
-      addPin(id, s.lat, s.lon, s.clientName||'Saved', s.clientId||'local', s.pinColor||'#ff4d4f', !!s.rf, s.groupId || null, s.subId || null);
+      addPin(id, s.lat, s.lon, s.clientName||'Saved', s.clientId||'local', s.pinColor||'#ff4d4f', !!s.rf, s.groupId || null);
       if (s.radius) applyRemoteRadius(id, s.radius);
       if (s.elevation) applyRemoteElevation(id, s.elevation);
       if (s.bearing) applyRemoteBearing(id, s.bearing);
@@ -1496,4 +1329,4 @@ socket.on('subIdAssigned', d => {
   }
   loadSavedPins();
 
-}); // DOMContentLoaded end
+}); // DOMContentLoaded end  
