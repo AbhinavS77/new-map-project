@@ -1,11 +1,9 @@
-// map.js (updated: host-box placement with yellow default + radius input, contextmenu color change)
-// Added zoom behavior: minZoom=3, maxZoom=15, tiles only available up to native zoom 10 (11-15 scale level-10).
-
 // --- Shared ID state (user-visible group IDs) ---
 let currentPinGroupId = "pin-101";   // all normal pins use this until regenerated
 let currentRfGroupId  = "rf-201";    // all RF pins use this until regenerated
-const usedGroupIds = new Set([currentPinGroupId, currentRfGroupId]); // prevent duplicates
-const groupCounters = { [currentPinGroupId]: 0, [currentRfGroupId]: 0 };
+let currentRadarGroupId = "radar-301"; // radar parent group id starts at 301
+const usedGroupIds = new Set([currentPinGroupId, currentRfGroupId, currentRadarGroupId]); // prevent duplicates
+const groupCounters = { [currentPinGroupId]: 0, [currentRfGroupId]: 0, [currentRadarGroupId]: 0 };
 
 // --- Group bookkeeping: pins grouped by groupId, and polylines per group ---
 const groupPins = {};   // groupId -> array of internal pin ids (in insertion order)
@@ -119,6 +117,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   const sidebar = document.getElementById('pinned-locations');
   const floating = document.getElementById('floating-buttons');
 
+  // new Radar button (assumes there's an element with id 'radar-toggle-btn' in your HTML)
+  const radarBtn = document.getElementById('radar-toggle-btn');
+
   // Chat UI refs
   const chatBtn = document.getElementById('chat-btn');
   const chatModal = document.getElementById('chat-modal');
@@ -157,35 +158,54 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Chat UI wiring (unchanged)
-  if (chatBtn) {
-    chatBtn.addEventListener('click', () => {
-      if (!chatModal) return;
-      const wasOpen = chatModal.style.display === 'block';
-      if (!wasOpen) {
-        chatModal.style.display = 'block';
-        chatModal.style.position = 'fixed';
-        chatModal.style.right = '16px';
-        chatModal.style.bottom = '16px';
-        chatModal.style.width = '32vw';
-        chatModal.style.height = '32vh';
-        chatModal.style.minWidth = '300px';
-        chatModal.style.minHeight = '260px';
-        chatModal.style.zIndex = '99999';
-        chatModal.style.borderRadius = '10px';
-        chatModal.style.boxShadow = '0 12px 30px rgba(0,0,0,0.18)';
-        chatModal.style.overflow = 'hidden';
-        if (chatMessages) {
-          chatMessages.style.overflowY = 'auto';
-          chatMessages.style.height = 'calc(100% - 110px)';
-          chatMessages.style.boxSizing = 'border-box';
-          setTimeout(()=> { chatMessages.scrollTop = chatMessages.scrollHeight; }, 40);
-        }
+ // Chat button: open the chat modal positioned just below the Clear All button (smaller fixed size)
+if (chatBtn) {
+  chatBtn.addEventListener('click', () => {
+    if (!chatModal) return;
+    const wasOpen = chatModal.style.display === 'block';
+    if (!wasOpen) {
+      // position relative to Clear All button so chat appears right below it
+      const clearRect = (clearBtn && typeof clearBtn.getBoundingClientRect === 'function')
+        ? clearBtn.getBoundingClientRect()
+        : null;
+
+      chatModal.style.display = 'block';
+      chatModal.style.position = 'fixed';
+      chatModal.style.right = '18px';
+
+      // If we can get Clear button position, place chat modal just below it; otherwise fallback to bottom
+      if (clearRect) {
+        chatModal.style.top = (clearRect.bottom + 8) + 'px';
+        chatModal.style.bottom = 'auto';
       } else {
-        chatModal.style.display = 'none';
+        chatModal.style.bottom = '16px';
+        chatModal.style.top = 'auto';
       }
-      if (chatModal.style.display === 'block' && chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
-    });
-  }
+
+      // Smaller fixed size (replace your "quarter-size" behavior)
+      chatModal.style.width = '360px';
+      chatModal.style.height = '420px';
+      chatModal.style.minWidth = '300px';
+      chatModal.style.minHeight = '260px';
+      chatModal.style.zIndex = '99999';
+      chatModal.style.borderRadius = '10px';
+      chatModal.style.boxShadow = '0 12px 30px rgba(0,0,0,0.18)';
+      chatModal.style.overflow = 'hidden';
+
+      if (chatMessages) {
+        chatMessages.style.overflowY = 'auto';
+        // make chat messages area fit inside new height
+        chatMessages.style.height = 'calc(100% - 110px)';
+        chatMessages.style.boxSizing = 'border-box';
+        setTimeout(()=> { chatMessages.scrollTop = chatMessages.scrollHeight; }, 40);
+      }
+    } else {
+      chatModal.style.display = 'none';
+    }
+    if (chatModal.style.display === 'block' && chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
+  });
+}
+
   if (chatCloseBtn) chatCloseBtn.addEventListener('click', ()=> { if (chatModal) chatModal.style.display='none'; });
   if (chatSendBtn) chatSendBtn.addEventListener('click', sendChatFromInput);
   if (chatInput) chatInput.addEventListener('keydown', (e) => { if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); sendChatFromInput(); } });
@@ -507,6 +527,18 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (lines[firstId]) { try { map.removeLayer(lines[firstId]); } catch(e){} delete lines[firstId]; }
           renderSidebarEntry(firstId);
           renderOverlayEntry(firstId, firstPin.lat, firstPin.lon, firstPin.rf ? 'RF' : 'Pin');
+
+          // If we are host, also request removal so clients remove the oldest pin from the group.
+          try {
+            if (isHost) {
+              const parts = firstId.split('_');
+              const owner = parts[0];
+              const orig = parts.slice(1).join('_');
+              if (owner !== 'overlay' && owner !== 'local' && socket && socket.connected) {
+                socket.emit('removePin', { id: orig, ownerClientId: owner });
+              }
+            }
+          } catch(e) { console.warn('emit removePin for archived first failed', e); }
         }
       }
 
@@ -544,6 +576,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
     if (groupLines[groupId]) { try { map.removeLayer(groupLines[groupId]); } catch(e){} delete groupLines[groupId]; }
+    // Radar groups should use purple for their group dotted line
+    if (String(groupId).startsWith('radar')) lineColor = lineColor || '#800080';
     const poly = L.polyline(latlngs, { color: lineColor || '#333', weight:2, opacity:0.9, dashArray: '6,6' }).addTo(map);
     groupLines[groupId] = poly;
   }
@@ -596,24 +630,72 @@ document.addEventListener('DOMContentLoaded', async () => {
   pinBtn.addEventListener('click', ()=> {
     isPinMode = !isPinMode;
     if (isPinMode) { isUserMode = false; userBtn.classList.remove('active'); userBtn.textContent = 'User Mode OFF'; }
+    // turning pin mode on should disable radar & rf
+    if (isPinMode) {
+      if (radarBtn) { radarBtn.classList.remove('active'); }
+      if (typeof isRadarMode !== 'undefined') isRadarMode = false;
+      if (rfBtn) { rfBtn.classList.remove('active'); }
+      isRFMode = false;
+    }
     pinBtn.classList.toggle('active', isPinMode);
     pinBtn.textContent = `Pin Mode ${isPinMode? 'ON':'OFF'}`;
   });
 
-  // RF toggle - ensure mutual exclusivity
-  const rfBtn = document.getElementById('rf-toggle-btn');
-  let isRFMode = false;
-  rfBtn && rfBtn.addEventListener('click', ()=> {
-    isRFMode = !isRFMode;
-    if (isRFMode) {
-      isPinMode = false;
-      pinBtn.classList.remove('active'); pinBtn.textContent = 'Pin Mode OFF';
-      isUserMode = false;
-      userBtn.classList.remove('active'); userBtn.textContent = 'User Mode OFF';
+// RF toggle - ensure mutual exclusivity (replace existing rfBtn listener with this)
+const rfBtn = document.getElementById('rf-toggle-btn');
+let isRFMode = false;
+rfBtn && rfBtn.addEventListener('click', ()=> {
+  isRFMode = !isRFMode;
+
+  if (isRFMode) {
+    // Turn off Radar if it was on
+    isRadarMode = false;
+    if (radarBtn) {
+      radarBtn.classList.remove('active');
+      radarBtn.textContent = 'Radar Mode OFF';
     }
-    rfBtn.classList.toggle('active', isRFMode);
-    rfBtn.textContent = `RF Mode ${isRFMode ? 'ON' : 'OFF'}`;
-  });
+
+    // Also turn off Pin/User modes to avoid confusion
+    isPinMode = false;
+    pinBtn.classList.remove('active');
+    pinBtn.textContent = 'Pin Mode OFF';
+
+    isUserMode = false;
+    userBtn.classList.remove('active');
+    userBtn.textContent = 'User Mode OFF';
+  }
+
+  rfBtn.classList.toggle('active', isRFMode);
+  rfBtn.textContent = `RF Mode ${isRFMode ? 'ON' : 'OFF'}`;
+});
+
+// Radar toggle - ensure mutual exclusivity with Pin & RF (replace existing radarBtn listener with this)
+let isRadarMode = false;
+radarBtn && radarBtn.addEventListener('click', ()=> {
+  isRadarMode = !isRadarMode;
+
+  if (isRadarMode) {
+    // Turn off RF if it was on
+    isRFMode = false;
+    if (rfBtn) {
+      rfBtn.classList.remove('active');
+      rfBtn.textContent = 'RF Mode OFF';
+    }
+
+    // Also turn off Pin/User modes to avoid confusion
+    isPinMode = false;
+    pinBtn.classList.remove('active');
+    pinBtn.textContent = 'Pin Mode OFF';
+
+    isUserMode = false;
+    userBtn.classList.remove('active');
+    userBtn.textContent = 'User Mode OFF';
+  }
+
+  radarBtn.classList.toggle('active', isRadarMode);
+  radarBtn.textContent = `Radar Mode ${isRadarMode ? 'ON' : 'OFF'}`;
+});
+
 
   // Clear
   clearBtn && clearBtn.addEventListener('click', () => {
@@ -630,11 +712,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Generate ID
   const generateBtn = document.getElementById('generate-ID-btn');
   generateBtn && generateBtn.addEventListener('click', () => {
-    const mode = isPinMode ? 'pin' : (isRFMode ? 'rf' : 'pin');
+    // prefer radar if radar mode is on; otherwise pin, then rf
+    const mode = isRadarMode ? 'radar' : (isPinMode ? 'pin' : (isRFMode ? 'rf' : 'pin'));
     function makeNextId(prefix, startNum=100) {
       let current;
       if (prefix === 'pin') current = currentPinGroupId;
-      else current = currentRfGroupId;
+      else if (prefix === 'rf') current = currentRfGroupId;
+      else if (prefix === 'radar') current = currentRadarGroupId;
+      else current = null;
       const m = (current || '').match(/-(\d+)$/);
       let n = m ? parseInt(m[1],10) : startNum;
       do {
@@ -649,12 +734,18 @@ document.addEventListener('DOMContentLoaded', async () => {
       usedGroupIds.add(newId);
       groupCounters[newId] = 0;
       showStatus(`New Pin group ID: ${newId}`);
-    } else {
+    } else if (mode === 'rf') {
       const newId = makeNextId('rf', 200);
       currentRfGroupId = newId;
       usedGroupIds.add(newId);
       groupCounters[newId] = 0;
       showStatus(`New RF group ID: ${newId}`);
+    } else if (mode === 'radar') {
+      const newId = makeNextId('radar', 300);
+      currentRadarGroupId = newId;
+      usedGroupIds.add(newId);
+      groupCounters[newId] = 0;
+      showStatus(`New Radar group ID: ${newId}`);
     }
   });
 
@@ -684,13 +775,68 @@ document.addEventListener('DOMContentLoaded', async () => {
           openShapePopupAt(currentShapePlacement, e.latlng);
         } else if (isUserMode) {
           placeUserDot(e.latlng, true);
+        } else if (isRadarMode) {
+          // Radar placement: optimistic local subId assignment when connected
+          const placementId = Date.now().toString() + '_' + Math.random().toString(36).slice(2,7);
+          const radarColor = '#800080';
+          if (socket && socket.connected && socket.id) {
+            const internalId = `${socket.id}_${placementId}`;
+            if (typeof groupCounters[currentRadarGroupId] === 'undefined') groupCounters[currentRadarGroupId] = 0;
+            groupCounters[currentRadarGroupId] = (groupCounters[currentRadarGroupId] || 0) + 1;
+            const assigned = `${getGroupDisplayBase(currentRadarGroupId)}.${groupCounters[currentRadarGroupId]}`;
+            addPin(internalId, e.latlng.lat, e.latlng.lng, (clientNameInput && clientNameInput.value) || clientName || 'Local', socket.id, radarColor, false, currentRadarGroupId, assigned);
+            // update overlay list immediately
+            try { renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'Radar'); } catch(e){/*ignore*/}
+
+            // notify server (server will also add and emit canonical assignments)
+            socket.emit('newPin', { id: placementId, groupId: currentRadarGroupId, lat: e.latlng.lat, lon: e.latlng.lng, pinColor: radarColor, rf: false });
+          } else {
+            // offline/local add (unchanged)
+            const internalId = `local_${placementId}`;
+            addPin(internalId, e.latlng.lat, e.latlng.lng, (clientNameInput && clientNameInput.value) || 'Local', 'local', '#FFEB3B', false, currentRadarGroupId, null);
+            renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'Radar');
+          }
         } else if (isRFMode) {
           const placementId = Date.now().toString() + '_' + Math.random().toString(36).slice(2,7);
-          socket && socket.emit('newPin', { id: placementId, groupId: currentRfGroupId, lat: e.latlng.lat, lon: e.latlng.lng, pinColor: '#20c933', rf: true });
-          socket && socket.emit('updateRadius', { id: placementId, radius: 5000, color: '#20c933' });
+          const rfColor = '#20c933';
+          if (socket && socket.connected && socket.id) {
+            const internalId = `${socket.id}_${placementId}`;
+            if (typeof groupCounters[currentRfGroupId] === 'undefined') groupCounters[currentRfGroupId] = 0;
+            groupCounters[currentRfGroupId] = (groupCounters[currentRfGroupId] || 0) + 1;
+            const assigned = `${getGroupDisplayBase(currentRfGroupId)}.${groupCounters[currentRfGroupId]}`;
+            // optimistic add + show radius immediately for better UX
+            addPin(internalId, e.latlng.lat, e.latlng.lng, (clientNameInput && clientNameInput.value) || clientName || 'Local', socket.id, rfColor, true, currentRfGroupId, assigned);
+            applyRemoteRadius(internalId, 5000, rfColor);
+            try { renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'RF'); } catch(e){/*ignore*/}
+
+            // notify server (server will echo and also update radius)
+            socket.emit('newPin', { id: placementId, groupId: currentRfGroupId, lat: e.latlng.lat, lon: e.latlng.lng, pinColor: rfColor, rf: true });
+            socket.emit('updateRadius', { id: placementId, radius: 5000, color: rfColor });
+          } else {
+            // offline/local behavior unchanged
+            const internalId = `local_${placementId}`;
+            addPin(internalId, e.latlng.lat, e.latlng.lng, (clientNameInput && clientNameInput.value) || 'Local', 'local', '#20c933', true, currentRfGroupId, null);
+            applyRemoteRadius(internalId, 5000, '#20c933');
+            try { renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'RF'); } catch(e){/*ignore*/}
+          }
         } else if (isPinMode) {
           const placementId = Date.now().toString() + '_' + Math.random().toString(36).slice(2,7);
-          socket && socket.emit('newPin', { id: placementId, groupId: currentPinGroupId, lat: e.latlng.lat, lon: e.latlng.lng });
+          const userPinColor = (pinColorInput && pinColorInput.value) ? pinColorInput.value : '#ff4d4f';
+          if (socket && socket.connected && socket.id) {
+            const internalId = `${socket.id}_${placementId}`;
+            if (typeof groupCounters[currentPinGroupId] === 'undefined') groupCounters[currentPinGroupId] = 0;
+            groupCounters[currentPinGroupId] = (groupCounters[currentPinGroupId] || 0) + 1;
+            const assigned = `${getGroupDisplayBase(currentPinGroupId)}.${groupCounters[currentPinGroupId]}`;
+            addPin(internalId, e.latlng.lat, e.latlng.lng, (clientNameInput && clientNameInput.value) || clientName || 'Local', socket.id, userPinColor, false, currentPinGroupId, assigned);
+            try { renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'Pin'); } catch(e){/*ignore*/}
+
+            // emit to server (server will also add and announce subIdAssigned back)
+            socket.emit('newPin', { id: placementId, groupId: currentPinGroupId, lat: e.latlng.lat, lon: e.latlng.lng, pinColor: userPinColor });
+          } else {
+            const internalId = `local_${placementId}`;
+            addPin(internalId, e.latlng.lat, e.latlng.lng, (clientNameInput && clientNameInput.value) || 'Local', 'local', '#ff4d4f', false, null, null);
+            try { renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'Pin'); } catch(e){/*ignore*/}
+          }
         }
       });
 
@@ -785,10 +931,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         return;
       }
 
-      addPin(pinId, d.lat, d.lon, d.clientName, d.clientId, d.pinColor, !!d.rf, d.groupId || null, null);
+      // If this pin belongs to a radar group (groupId string starting with 'radar'), ensure pinColor default is yellow
+     // If this pin belongs to a radar group, default pinColor to purple
+const pinColor = d.pinColor || (d.groupId && String(d.groupId).startsWith('radar') ? '#800080' : '#ff4d4f');
+
+
+      addPin(pinId, d.lat, d.lon, d.clientName, d.clientId, pinColor, !!d.rf, d.groupId || null, null);
 
       const overlaysListEl = overlaysContainer.querySelector('#overlay-pins');
-      if (overlaysListEl) renderOverlayEntry(pinId, d.lat, d.lon, d.rf ? 'RF' : 'Pin');
+      if (overlaysListEl) renderOverlayEntry(pinId, d.lat, d.lon, d.rf ? 'RF' : (d.groupId && String(d.groupId).startsWith('radar') ? 'Radar' : 'Pin'));
     });
 
     socket.on('pinRemoved', d => {
@@ -828,19 +979,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     socket.on('userDotPlacedAck', d => {
       if (!isHost) placeUserDot(L.latLng(d.lat, d.lon), false, d.clientName, d.userDotColor);
     });
-
-    // socket.on('subIdAssigned', d => {
-    //   if (!d || !d.clientId || !d.id || !d.subId) return;
-    //   const pinId = `${d.clientId}_${d.id}`;
-    //   const p = pins[pinId];
-    //   if (p) {
-    //     p.subId = d.subId;
-    //     if (p.marker && p.marker.setIcon) {
-    //       try { p.marker.setIcon(buildLabeledDivIcon(d.subId, p.pinColor || '#ff4d4f', fontSizeForZoom(map.getZoom()))); } catch(e) {}
-    //     }
-    //     renderSidebarEntry(pinId);
-    //   }
-    // });
 
 socket.on('subIdAssigned', d => {
   if (!d || !d.clientId || !d.id || !d.subId) return;
@@ -1148,12 +1286,18 @@ socket.on('subIdAssigned', d => {
     btn.addEventListener('click', ()=> {
       const km = parseFloat(inp.value); if (isNaN(km) || km<=0) return alert('Enter valid kilometers');
       const m = km*1000; if (p.radiusCircle) map.removeLayer(p.radiusCircle);
-      p.radiusCircle = L.circle(p.marker.getLatLng(), { radius:m, color:p.pinColor||'#ff4d4f', fillColor:p.pinColor||'#ff4d4f', fillOpacity:0.25 }).addTo(map);
+      // choose color depending on group / RF / pin
+      let circleColor = p.pinColor || '#ff4d4f';
+      if (p.groupId && String(p.groupId).startsWith('radar')) circleColor = '#800080'; // purple for radar
+      else if (p.rf) circleColor = '#20c933'; // green for RF
+      else circleColor = p.pinColor || '#ff4d4f'; // red for normal pins
+
+      p.radiusCircle = L.circle(p.marker.getLatLng(), { radius:m, color:circleColor, fillColor:circleColor, fillOpacity:0.25 }).addTo(map);
       const parts = id.split('_'); const orig = parts.slice(1).join('_'); const owner = parts[0];
       if (isHost) {
-        socket && socket.emit('updateRadius', { id: orig, radius: m, color: p.pinColor, ownerClientId: owner });
+        socket && socket.emit('updateRadius', { id: orig, radius: m, color: circleColor, ownerClientId: owner });
       } else {
-        socket && socket.emit('updateRadius', { id: orig, radius: m, color: p.pinColor });
+        socket && socket.emit('updateRadius', { id: orig, radius: m, color: circleColor });
       }
       renderSidebarEntry(id); p.marker.closePopup(); updateLines();
     });
