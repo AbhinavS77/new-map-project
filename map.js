@@ -1,3 +1,11 @@
+// map.js - full client-side map script (merged parts + bearing updates)
+// Features:
+//  - geodesic bearing (bearingFromLatLon)
+//  - client-side bearing computation for Pin mode and when placing user-dot
+//  - client emits updateBearing { id, bearing, clientId } so host receives and shows bearing
+//  - bearing value auto-fills overlay and sidebar bearing inputs
+//  - connecting lines show distance + bearing as a centered tooltip
+
 // --- Shared ID state (user-visible group IDs) ---
 let currentPinGroupId = "pin-101";   // all normal pins use this until regenerated
 let currentRfGroupId  = "rf-201";    // all RF pins use this until regenerated
@@ -40,7 +48,6 @@ function buildLabeledDivIcon(subId, pinColor, fontSize = 12) {
 }
 function buildMarkerIcon(pinColor) {
   const ICON_SIZE = [30, 45];
-  const ICON_BOTTOM_PADDING = -100;
   const svgUrl = createSvgIconDataUrl(pinColor);
   const anchorY = ICON_SIZE[1];
   return L.icon({
@@ -97,9 +104,29 @@ function randomPastel() {
 }
 function escapeHtml(s) { return (s+'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
+// ---------- geodesic bearing helper (degrees from North clockwise) ----------
+function bearingFromLatLon(lat1, lon1, lat2, lon2) {
+  // returns degrees in [0,360)
+  const toRad = Math.PI/180;
+  const toDeg = 180/Math.PI;
+  const φ1 = lat1 * toRad;
+  const φ2 = lat2 * toRad;
+  const Δλ = (lon2 - lon1) * toRad;
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1)*Math.sin(φ2) - Math.sin(φ1)*Math.cos(φ2)*Math.cos(Δλ);
+  let θ = Math.atan2(y, x);
+  let deg = (θ * toDeg + 360) % 360;
+  return deg;
+}
+function formatBearing(b) {
+  if (typeof b !== 'number' || !isFinite(b)) return '—';
+  return (Math.round(b*10)/10).toFixed(1);
+}
+// ---------- END helpers ----------
+
 // --- DOM refs & state ---
 document.addEventListener('DOMContentLoaded', async () => {
-  // UI refs (same as your original)
+  // UI refs
   const modal = document.getElementById('connection-modal');
   const hostBtn = document.getElementById('host-btn');
   const clientBtn = document.getElementById('client-btn');
@@ -117,7 +144,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const sidebar = document.getElementById('pinned-locations');
   const floating = document.getElementById('floating-buttons');
 
-  // new Radar button (assumes there's an element with id 'radar-toggle-btn' in your HTML)
+  // new Radar button
   const radarBtn = document.getElementById('radar-toggle-btn');
 
   // Chat UI refs
@@ -157,55 +184,49 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
   }
 
-  // Chat UI wiring (unchanged)
- // Chat button: open the chat modal positioned just below the Clear All button (smaller fixed size)
-if (chatBtn) {
-  chatBtn.addEventListener('click', () => {
-    if (!chatModal) return;
-    const wasOpen = chatModal.style.display === 'block';
-    if (!wasOpen) {
-      // position relative to Clear All button so chat appears right below it
-      const clearRect = (clearBtn && typeof clearBtn.getBoundingClientRect === 'function')
-        ? clearBtn.getBoundingClientRect()
-        : null;
+  // Chat UI wiring
+  if (chatBtn) {
+    chatBtn.addEventListener('click', () => {
+      if (!chatModal) return;
+      const wasOpen = chatModal.style.display === 'block';
+      if (!wasOpen) {
+        const clearRect = (clearBtn && typeof clearBtn.getBoundingClientRect === 'function')
+          ? clearBtn.getBoundingClientRect()
+          : null;
 
-      chatModal.style.display = 'block';
-      chatModal.style.position = 'fixed';
-      chatModal.style.right = '18px';
+        chatModal.style.display = 'block';
+        chatModal.style.position = 'fixed';
+        chatModal.style.right = '18px';
 
-      // If we can get Clear button position, place chat modal just below it; otherwise fallback to bottom
-      if (clearRect) {
-        chatModal.style.top = (clearRect.bottom + 8) + 'px';
-        chatModal.style.bottom = 'auto';
+        if (clearRect) {
+          chatModal.style.top = (clearRect.bottom + 8) + 'px';
+          chatModal.style.bottom = 'auto';
+        } else {
+          chatModal.style.bottom = '16px';
+          chatModal.style.top = 'auto';
+        }
+
+        chatModal.style.width = '360px';
+        chatModal.style.height = '420px';
+        chatModal.style.minWidth = '300px';
+        chatModal.style.minHeight = '260px';
+        chatModal.style.zIndex = '99999';
+        chatModal.style.borderRadius = '10px';
+        chatModal.style.boxShadow = '0 12px 30px rgba(0,0,0,0.18)';
+        chatModal.style.overflow = 'hidden';
+
+        if (chatMessages) {
+          chatMessages.style.overflowY = 'auto';
+          chatMessages.style.height = 'calc(100% - 110px)';
+          chatMessages.style.boxSizing = 'border-box';
+          setTimeout(()=> { chatMessages.scrollTop = chatMessages.scrollHeight; }, 40);
+        }
       } else {
-        chatModal.style.bottom = '16px';
-        chatModal.style.top = 'auto';
+        chatModal.style.display = 'none';
       }
-
-      // Smaller fixed size (replace your "quarter-size" behavior)
-      chatModal.style.width = '360px';
-      chatModal.style.height = '420px';
-      chatModal.style.minWidth = '300px';
-      chatModal.style.minHeight = '260px';
-      chatModal.style.zIndex = '99999';
-      chatModal.style.borderRadius = '10px';
-      chatModal.style.boxShadow = '0 12px 30px rgba(0,0,0,0.18)';
-      chatModal.style.overflow = 'hidden';
-
-      if (chatMessages) {
-        chatMessages.style.overflowY = 'auto';
-        // make chat messages area fit inside new height
-        chatMessages.style.height = 'calc(100% - 110px)';
-        chatMessages.style.boxSizing = 'border-box';
-        setTimeout(()=> { chatMessages.scrollTop = chatMessages.scrollHeight; }, 40);
-      }
-    } else {
-      chatModal.style.display = 'none';
-    }
-    if (chatModal.style.display === 'block' && chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
-  });
-}
-
+      if (chatModal.style.display === 'block' && chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
+    });
+  }
   if (chatCloseBtn) chatCloseBtn.addEventListener('click', ()=> { if (chatModal) chatModal.style.display='none'; });
   if (chatSendBtn) chatSendBtn.addEventListener('click', sendChatFromInput);
   if (chatInput) chatInput.addEventListener('keydown', (e) => { if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); sendChatFromInput(); } });
@@ -237,7 +258,7 @@ if (chatBtn) {
     overlaysContainer.style.marginTop = '12px';
   }
 
-  // small CSS injection for overlays and chat (unchanged from previous version)
+  // small CSS injection for overlays and chat
   const _hlStyle = document.createElement('style');
   _hlStyle.id = 'map-overlays-style';
   _hlStyle.textContent = `
@@ -258,6 +279,7 @@ if (chatBtn) {
     #overlays-container .btn.secondary { background:#f8fafc; }
     .shape-entry { }
     .labeled-marker-icon img { pointer-events:auto; }  /* allow marker interactions */
+    .line-tooltip { background: rgba(255,255,255,0.92); padding:4px 8px; border-radius:6px; border:1px solid rgba(0,0,0,0.08); font-size:12px; color:#111; }
   `;
   document.head.appendChild(_hlStyle);
 
@@ -315,7 +337,6 @@ if (chatBtn) {
     content.querySelector('.overlay-show').onclick = () => {
       const pinObj = pins[internalId];
       if (pinObj && pinObj.marker) {
-        // avoid forcing zoom over native tile zoom; cap programmatic show-zoom to 10
         const targetZoom = map ? Math.max(map.getZoom(), 10) : 10;
         map.setView(pinObj.marker.getLatLng(), targetZoom, { animate: true });
         showRadiusPopup(internalId);
@@ -360,8 +381,9 @@ if (chatBtn) {
             const orig = parts.slice(1).join('_');
             const owner = parts[0];
             if (owner !== 'overlay' && owner !== 'local') {
-              if (isHost) socket.emit('updateBearing', { id: orig, bearing: val, ownerClientId: owner });
-              else socket.emit('updateBearing', { id: orig, bearing: val });
+              // emit to host: include clientId so host maps to correct internal id
+              if (isHost) socket.emit('updateBearing', { id: orig, bearing: val, ownerClientId: owner, clientId: owner });
+              else socket.emit('updateBearing', { id: orig, bearing: val, clientId: socket.id });
             }
           }
           renderSidebarEntry(internalId);
@@ -421,13 +443,28 @@ if (chatBtn) {
         const internalId = `overlay_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,6)}`;
         const ownerClientId = (socket && socket.id) ? socket.id : 'local';
         addPin(internalId, lat, lon, (clientNameInput && clientNameInput.value) || 'Local', ownerClientId, '#ff4d4f', false, null, null);
+
+        // ---------- NEW: compute bearing for offline overlay pin if user dot exists ----------
+        try {
+          if (!isHost && userMarker && pins[internalId]) {
+            const u = userMarker.getLatLng();
+            const deg = bearingFromLatLon(u.lat, u.lng, lat, lon);
+            pins[internalId].bearing = deg;
+            // update overlay + sidebar
+            renderOverlayEntry(internalId, lat, lon, 'Pin');
+            renderSidebarEntry(internalId);
+          } else {
+            renderOverlayEntry(internalId, lat, lon, 'Pin');
+          }
+        } catch(e) { renderOverlayEntry(internalId, lat, lon, 'Pin'); }
+        // ----------------------------------------------------------------------------------
+
         map.setView([lat, lon], Math.max(map.getZoom(), 10), { animate: true });
-        renderOverlayEntry(internalId, lat, lon, 'Pin');
         showStatus(`Pinned at ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
       });
     }
 
-    // resizer (unchanged)
+    // resizer
     const resizer = overlaysContainer.querySelector('.resizer');
     if (resizer && !overlaysContainer.dataset.resizerAttached) {
       overlaysContainer.dataset.resizerAttached = '1';
@@ -483,7 +520,6 @@ if (chatBtn) {
   }
 
   // helper: compute font size from map zoom (tweak mapping as desired)
-  // IMPORTANT: clamp zoom for label sizing so zoom > 10 doesn't increase label size
   function fontSizeForZoom(z) {
     if (typeof z === 'undefined' || z === null) z = 5;
     const zClamped = Math.max(3, Math.min(10, z)); // clamp to 3..10 for sizing
@@ -815,7 +851,7 @@ radarBtn && radarBtn.addEventListener('click', ()=> {
           } else {
             // offline/local behavior unchanged
             const internalId = `local_${placementId}`;
-            addPin(internalId, e.latlng.lat, e.latlng.lng, (clientNameInput && clientNameInput.value) || 'Local', 'local', '#20c933', true, currentRfGroupId, null);
+            addPin(internalId, e.latlng.lat, e.latlng.lng, (clientNameInput && clientNameInput.value) || clientName || 'Local', 'local', '#20c933', true, currentRfGroupId, null);
             applyRemoteRadius(internalId, 5000, '#20c933');
             try { renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'RF'); } catch(e){/*ignore*/}
           }
@@ -828,14 +864,40 @@ radarBtn && radarBtn.addEventListener('click', ()=> {
             groupCounters[currentPinGroupId] = (groupCounters[currentPinGroupId] || 0) + 1;
             const assigned = `${getGroupDisplayBase(currentPinGroupId)}.${groupCounters[currentPinGroupId]}`;
             addPin(internalId, e.latlng.lat, e.latlng.lng, (clientNameInput && clientNameInput.value) || clientName || 'Local', socket.id, userPinColor, false, currentPinGroupId, assigned);
+
+            // ---------- NEW: compute bearing client-side (geodesic) and emit updateBearing ----------
+            try {
+              if (!isHost && userMarker && pins[internalId]) {
+                const u = userMarker.getLatLng();
+                const deg = bearingFromLatLon(u.lat, u.lng, e.latlng.lat, e.latlng.lng);
+                pins[internalId].bearing = deg;
+                // inform host by emitting updateBearing using the original placementId and clientId
+                socket.emit('updateBearing', { id: placementId, bearing: deg, clientId: socket.id });
+              }
+            } catch(e) { /* ignore bearing errors */ }
+            // -------------------------------------------------------------------------------------
+
             try { renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'Pin'); } catch(e){/*ignore*/}
 
             // emit to server (server will also add and announce subIdAssigned back)
             socket.emit('newPin', { id: placementId, groupId: currentPinGroupId, lat: e.latlng.lat, lon: e.latlng.lng, pinColor: userPinColor });
           } else {
             const internalId = `local_${placementId}`;
-            addPin(internalId, e.latlng.lat, e.latlng.lng, (clientNameInput && clientNameInput.value) || 'Local', 'local', '#ff4d4f', false, null, null);
-            try { renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'Pin'); } catch(e){/*ignore*/}
+            addPin(internalId, e.latlng.lat, e.latlng.lng, (clientNameInput && clientNameInput.value) || clientName || 'Local', 'local', '#ff4d4f', false, null, null);
+
+            // ---------- NEW: offline/local pin bearing computed if user dot exists ----------
+            try {
+              if (!isHost && userMarker && pins[internalId]) {
+                const u = userMarker.getLatLng();
+                const deg = bearingFromLatLon(u.lat, u.lng, e.latlng.lat, e.latlng.lng);
+                pins[internalId].bearing = deg;
+                renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'Pin');
+                renderSidebarEntry(internalId);
+              } else {
+                renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'Pin');
+              }
+            } catch(e) { renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'Pin'); }
+            // ---------------------------------------------------------------------------------
           }
         }
       });
@@ -846,8 +908,12 @@ radarBtn && radarBtn.addEventListener('click', ()=> {
       setTimeout(()=>map.invalidateSize(),150);
     } else setTimeout(()=>map.invalidateSize(),150);
 
+    // connect socket.io
     socket = io(serverUrl, { query: { isHost: hostFlag ? 'true' : 'false' } });
+
+    // debug logs for connection
     socket.on('connect', () => {
+      console.log('socket connected', socket.id, 'isHost=', hostFlag);
       showStatus('Connected to server');
       if (!hostFlag) {
         const info = {
@@ -931,10 +997,8 @@ radarBtn && radarBtn.addEventListener('click', ()=> {
         return;
       }
 
-      // If this pin belongs to a radar group (groupId string starting with 'radar'), ensure pinColor default is yellow
-     // If this pin belongs to a radar group, default pinColor to purple
-const pinColor = d.pinColor || (d.groupId && String(d.groupId).startsWith('radar') ? '#800080' : '#ff4d4f');
-
+      // decide color
+      const pinColor = d.pinColor || (d.groupId && String(d.groupId).startsWith('radar') ? '#800080' : '#ff4d4f');
 
       addPin(pinId, d.lat, d.lon, d.clientName, d.clientId, pinColor, !!d.rf, d.groupId || null, null);
 
@@ -959,10 +1023,20 @@ const pinColor = d.pinColor || (d.groupId && String(d.groupId).startsWith('radar
       const pinId = `${d.clientId}_${d.id}`;
       applyRemoteElevation(pinId, d.elevation);
     });
+
+    // ---------- IMPORTANT: host receives updateBearing and applies it ----------
     socket.on('updateBearing', d => {
-      const pinId = `${d.clientId}_${d.id}`;
-      applyRemoteBearing(pinId, d.bearing);
+      // expecting { clientId, id, bearing } or { ownerClientId, id, bearing }
+      try {
+        if (!d || typeof d.id === 'undefined') return;
+        const clientId = d.clientId || d.ownerClientId || d.client;
+        if (!clientId) return;
+        const pinId = `${clientId}_${d.id}`;
+        applyRemoteBearing(pinId, d.bearing);
+      } catch (e) { console.warn('updateBearing handler failed', e); }
     });
+
+    // userDotPlaced: host retains userDots; client receives ack to place local userMarker
     socket.on('userDotPlaced', d => {
       if (isHost) {
         if (userDots[d.clientId]) { try { map.removeLayer(userDots[d.clientId]); } catch(e){} delete userDots[d.clientId]; }
@@ -980,21 +1054,21 @@ const pinColor = d.pinColor || (d.groupId && String(d.groupId).startsWith('radar
       if (!isHost) placeUserDot(L.latLng(d.lat, d.lon), false, d.clientName, d.userDotColor);
     });
 
-socket.on('subIdAssigned', d => {
-  if (!d || !d.clientId || !d.id || !d.subId) return;
-  const pinId = `${d.clientId}_${d.id}`;
-  const p = pins[pinId];
-  if (p) {
-    p.subId = d.subId;
-    const currentZoom = (map && typeof map.getZoom === 'function') ? map.getZoom() : 5;
-    const fs = fontSizeForZoom(currentZoom);
-    if (p.marker && p.marker.setIcon) {
-      try { p.marker.setIcon(buildLabeledDivIcon(d.subId, p.pinColor || '#ff4d4f', fs)); } catch(e) {}
-    }
-    renderSidebarEntry(pinId);
-    try { renderOverlayEntry(pinId, p.lat, p.lon, p.rf ? 'RF' : 'Pin'); } catch(e) {}
-  }
-});
+    socket.on('subIdAssigned', d => {
+      if (!d || !d.clientId || !d.id || !d.subId) return;
+      const pinId = `${d.clientId}_${d.id}`;
+      const p = pins[pinId];
+      if (p) {
+        p.subId = d.subId;
+        const currentZoom = (map && typeof map.getZoom === 'function') ? map.getZoom() : 5;
+        const fs = fontSizeForZoom(currentZoom);
+        if (p.marker && p.marker.setIcon) {
+          try { p.marker.setIcon(buildLabeledDivIcon(d.subId, p.pinColor || '#ff4d4f', fs)); } catch(e) {}
+        }
+        renderSidebarEntry(pinId);
+        try { renderOverlayEntry(pinId, p.lat, p.lon, p.rf ? 'RF' : 'Pin'); } catch(e) {}
+      }
+    });
 
 
     // shapes
@@ -1173,6 +1247,8 @@ socket.on('subIdAssigned', d => {
     delete shapes[shapeId];
     renderShapesList();
   }
+
+
   function openHostEditShapePopup(shapeMeta) {
     if (!isHost) return;
     const latlng = [shapeMeta.lat, shapeMeta.lon];
@@ -1331,6 +1407,7 @@ socket.on('subIdAssigned', d => {
       const inp = ov.querySelector('.ov-bear');
       if (inp) inp.value = bearing;
     }
+    updateLines();
   }
 
   function removePin(id) {
@@ -1440,9 +1517,9 @@ socket.on('subIdAssigned', d => {
           const orig = parts.slice(1).join('_');
           const owner = parts[0];
           if (isHost) {
-            if (owner !== 'overlay' && owner !== 'local') socket.emit('updateBearing', { id: orig, bearing: val, ownerClientId: owner });
+            if (owner !== 'overlay' && owner !== 'local') socket.emit('updateBearing', { id: orig, bearing: val, ownerClientId: owner, clientId: owner });
           } else {
-            if (owner !== 'overlay' && owner !== 'local') socket.emit('updateBearing', { id: orig, bearing: val });
+            if (owner !== 'overlay' && owner !== 'local') socket.emit('updateBearing', { id: orig, bearing: val, clientId: socket.id });
           }
           const ov = overlaysContainer.querySelector(`#overlay-pins div[data-id="${id}"]`);
           if (ov) {
@@ -1485,7 +1562,7 @@ socket.on('subIdAssigned', d => {
     }
   }
 
-  // --- Lines rendering for user-dot -> pins (unchanged except robust checks) ---
+  // --- Lines rendering for user-dot -> pins ---
   function updateLines() {
     for (const k in lines) { try { map.removeLayer(lines[k]); } catch(e){} delete lines[k]; }
     const LINE_COLOR = '#ff4d4f';
@@ -1498,7 +1575,14 @@ socket.on('subIdAssigned', d => {
           if (pin.clientId === clientId && pin.marker) {
             const poly = L.polyline([dotLL, pin.marker.getLatLng()], { color: LINE_COLOR, weight:2, opacity:0.9 }).addTo(map);
             const dist = (dotLL.distanceTo(pin.marker.getLatLng())/1000).toFixed(2) + ' km';
-            poly.bindTooltip(dist, { sticky:true });
+            // show bearing if available, else compute
+            let bearingVal = (typeof pin.bearing === 'number' && !isNaN(pin.bearing)) ? pin.bearing : null;
+            if (bearingVal === null && pin.marker && typeof pin.marker.getLatLng === 'function') {
+              const pll = pin.marker.getLatLng();
+              bearingVal = bearingFromLatLon(dotLL.lat, dotLL.lng, pll.lat, pll.lng);
+            }
+            const label = `${dist} • ${formatBearing(bearingVal)}°`;
+            poly.bindTooltip(label, { permanent: true, direction: 'center', className: 'line-tooltip' });
             lines[pinId] = poly;
           }
         });
@@ -1510,7 +1594,16 @@ socket.on('subIdAssigned', d => {
         if (socket && pinId.startsWith(socket.id) && pin.marker) {
           const poly = L.polyline([userLL, pin.marker.getLatLng()], { color: LINE_COLOR, weight:2, opacity:0.9 }).addTo(map);
           const dist = (userLL.distanceTo(pin.marker.getLatLng())/1000).toFixed(2) + ' km';
-          poly.bindTooltip(dist, { sticky:true });
+          // prefer stored bearing; if not present compute
+          let bearingVal = (typeof pin.bearing === 'number' && !isNaN(pin.bearing)) ? pin.bearing : null;
+          if (bearingVal === null && pin.marker && typeof pin.marker.getLatLng === 'function') {
+            const pll = pin.marker.getLatLng();
+            bearingVal = bearingFromLatLon(userLL.lat, userLL.lng, pll.lat, pll.lng);
+            // store it locally (so overlay shows), but do not emit if it's already been emitted
+            try { pin.bearing = bearingVal; } catch(e){}
+          }
+          const label = `${dist} • ${formatBearing(bearingVal)}°`;
+          poly.bindTooltip(label, { permanent: true, direction: 'center', className: 'line-tooltip' });
           lines[pinId] = poly;
         }
       });
@@ -1537,8 +1630,46 @@ socket.on('subIdAssigned', d => {
       sidebar.insertBefore(userSidebar, sidebar.firstChild);
     }
     if (renderOnly) {
+      // emit userDotPlaced as before
       socket.emit('userDotPlaced', { lat: latlng.lat, lon: latlng.lng });
       isUserMode = false; userBtn.classList.remove('active'); userBtn.textContent='User Mode OFF';
+
+      // ---------- NEW: compute bearings for all client's own pins and emit updateBearing ----------
+      try {
+        if (!isHost && socket && socket.connected && socket.id) {
+          Object.entries(pins).forEach(([pinId, pin]) => {
+            if (!pin) return;
+            if (pinId.startsWith(socket.id)) {
+              // compute geodesic bearing from user -> pin
+              const deg = bearingFromLatLon(latlng.lat, latlng.lng, pin.lat, pin.lon);
+              pin.bearing = deg;
+              // emit updateBearing for this pin (orig id)
+              const parts = pinId.split('_');
+              const orig = parts.slice(1).join('_');
+              if (orig) {
+                // include clientId so host can map it back to the right client
+                socket.emit('updateBearing', { id: orig, bearing: deg, clientId: socket.id });
+              }
+
+              // update overlay + sidebar UI
+              try { renderOverlayEntry(pinId, pin.lat, pin.lon, pin.rf ? 'RF' : 'Pin'); } catch(e){}
+              try { renderSidebarEntry(pinId); } catch(e){}
+            }
+          });
+        } else {
+          // offline: update overlays locally
+          Object.entries(pins).forEach(([pinId, pin]) => {
+            if (!pin) return;
+            if (pinId.startsWith('local_') || (userMarker && pinId.startsWith((socket && socket.id)||'local'))) {
+              const deg = bearingFromLatLon(latlng.lat, latlng.lng, pin.lat, pin.lon);
+              pin.bearing = deg;
+              try { renderOverlayEntry(pinId, pin.lat, pin.lon, pin.rf ? 'RF' : 'Pin'); } catch(e){}
+              try { renderSidebarEntry(pinId); } catch(e){}
+            }
+          });
+        }
+      } catch(e) { console.warn('user-dot bearing compute failed', e); }
+      // ---------------------------------------------------------------------------------------
     }
     updateLines();
   }
@@ -1580,7 +1711,6 @@ socket.on('subIdAssigned', d => {
     Object.keys(groupPins).forEach(k => delete groupPins[k]);
     updateLines();
   }
-
   function showClientData(clientId) {
     selectedClientId = clientId;
     Object.entries(pins).forEach(([key,p]) => {
