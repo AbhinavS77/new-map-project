@@ -1,11 +1,4 @@
-// map.js - full client-side map script (merged parts + bearing updates)
-// Features:
-//  - geodesic bearing (bearingFromLatLon)
-//  - client-side bearing computation for Pin mode and when placing user-dot
-//  - client emits updateBearing { id, bearing, clientId } so host receives and shows bearing
-//  - bearing value auto-fills overlay and sidebar bearing inputs
-//  - connecting lines show distance + bearing as a centered tooltip
-
+// map.js (merged part1 + part2) - updated per user requests
 // --- Shared ID state (user-visible group IDs) ---
 let currentPinGroupId = "pin-101";   // all normal pins use this until regenerated
 let currentRfGroupId  = "rf-201";    // all RF pins use this until regenerated
@@ -509,6 +502,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const pins = {};    // key: `${clientId}_${placementId}` or overlay_internal id
   const userDots = {}; // clientId -> circleMarker
   const lines = {};   // pinKey -> polyline (distance lines)
+  const hitLines = {}; // pinKey -> invisible wide polyline used to increase hover target
   let selectedClientId = null;
   let currentShapePlacement = null;
 
@@ -627,6 +621,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     serverBtn.style.display = 'block'; serverPanel.style.display = 'block';
     showStatus('Hosting on this machine');
     createHostShapeButtons();
+    // per request: remove/hide User Mode button on host so host cannot place user-dot
+    try { if (userBtn) userBtn.style.display = 'none'; } catch(e){}
   });
 
   // --- Client join ---
@@ -747,43 +743,65 @@ radarBtn && radarBtn.addEventListener('click', ()=> {
 
   // Generate ID
   const generateBtn = document.getElementById('generate-ID-btn');
-  generateBtn && generateBtn.addEventListener('click', () => {
-    // prefer radar if radar mode is on; otherwise pin, then rf
-    const mode = isRadarMode ? 'radar' : (isPinMode ? 'pin' : (isRFMode ? 'rf' : 'pin'));
-    function makeNextId(prefix, startNum=100) {
-      let current;
-      if (prefix === 'pin') current = currentPinGroupId;
-      else if (prefix === 'rf') current = currentRfGroupId;
-      else if (prefix === 'radar') current = currentRadarGroupId;
-      else current = null;
-      const m = (current || '').match(/-(\d+)$/);
-      let n = m ? parseInt(m[1],10) : startNum;
-      do {
-        n++;
-        const candidate = `${prefix}-${n}`;
-        if (!usedGroupIds.has(candidate)) return candidate;
-      } while (true);
+  // create a dropdown to show/store which generate id is in use
+  if (generateBtn) {
+    let genSelect = document.getElementById('generate-id-select');
+    if (!genSelect) {
+      genSelect = document.createElement('select');
+      genSelect.id = 'generate-id-select';
+      genSelect.style.marginLeft = '8px';
+      genSelect.style.padding = '6px';
+      const optPin = document.createElement('option'); optPin.value='pin'; optPin.textContent = currentPinGroupId;
+      const optRf = document.createElement('option'); optRf.value='rf'; optRf.textContent = currentRfGroupId;
+      const optRadar = document.createElement('option'); optRadar.value='radar'; optRadar.textContent = currentRadarGroupId;
+      genSelect.appendChild(optPin); genSelect.appendChild(optRf); genSelect.appendChild(optRadar);
+      generateBtn.parentNode && generateBtn.parentNode.insertBefore(genSelect, generateBtn.nextSibling);
     }
-    if (mode === 'pin') {
-      const newId = makeNextId('pin', 100);
-      currentPinGroupId = newId;
-      usedGroupIds.add(newId);
-      groupCounters[newId] = 0;
-      showStatus(`New Pin group ID: ${newId}`);
-    } else if (mode === 'rf') {
-      const newId = makeNextId('rf', 200);
-      currentRfGroupId = newId;
-      usedGroupIds.add(newId);
-      groupCounters[newId] = 0;
-      showStatus(`New RF group ID: ${newId}`);
-    } else if (mode === 'radar') {
-      const newId = makeNextId('radar', 300);
-      currentRadarGroupId = newId;
-      usedGroupIds.add(newId);
-      groupCounters[newId] = 0;
-      showStatus(`New Radar group ID: ${newId}`);
-    }
-  });
+
+    generateBtn.addEventListener('click', () => {
+      const sel = document.getElementById('generate-id-select');
+      const selectedMode = sel ? sel.value : (isRadarMode ? 'radar' : (isPinMode ? 'pin' : (isRFMode ? 'rf' : 'pin')));
+      // prefer radar if radar mode is on; otherwise pin, then rf (fallback kept for compatibility)
+      const mode = selectedMode || (isRadarMode ? 'radar' : (isPinMode ? 'pin' : (isRFMode ? 'rf' : 'pin')));
+      function makeNextId(prefix, startNum=100) {
+        let current;
+        if (prefix === 'pin') current = currentPinGroupId;
+        else if (prefix === 'rf') current = currentRfGroupId;
+        else if (prefix === 'radar') current = currentRadarGroupId;
+        else current = null;
+        const m = (current || '').match(/-(\d+)$/);
+        let n = m ? parseInt(m[1],10) : startNum;
+        do {
+          n++;
+          const candidate = `${prefix}-${n}`;
+          if (!usedGroupIds.has(candidate)) return candidate;
+        } while (true);
+      }
+      if (mode === 'pin') {
+        const newId = makeNextId('pin', 100);
+        currentPinGroupId = newId;
+        usedGroupIds.add(newId);
+        groupCounters[newId] = 0;
+        showStatus(`New Pin group ID: ${newId}`);
+        // update dropdown label
+        const o = document.querySelector('#generate-id-select option[value="pin"]'); if (o) o.textContent = newId; if (sel) sel.value='pin';
+      } else if (mode === 'rf') {
+        const newId = makeNextId('rf', 200);
+        currentRfGroupId = newId;
+        usedGroupIds.add(newId);
+        groupCounters[newId] = 0;
+        showStatus(`New RF group ID: ${newId}`);
+        const o = document.querySelector('#generate-id-select option[value="rf"]'); if (o) o.textContent = newId; if (sel) sel.value='rf';
+      } else if (mode === 'radar') {
+        const newId = makeNextId('radar', 300);
+        currentRadarGroupId = newId;
+        usedGroupIds.add(newId);
+        groupCounters[newId] = 0;
+        showStatus(`New Radar group ID: ${newId}`);
+        const o = document.querySelector('#generate-id-select option[value="radar"]'); if (o) o.textContent = newId; if (sel) sel.value='radar';
+      }
+    });
+  }
 
   // --- init app and socket handlers ---
   function initApp(url, hostFlag=false, clientName=null, colors=null) {
@@ -845,6 +863,21 @@ radarBtn && radarBtn.addEventListener('click', ()=> {
             applyRemoteRadius(internalId, 5000, rfColor);
             try { renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'RF'); } catch(e){/*ignore*/}
 
+            // ---------- NEW: compute bearing client-side for RF pins (same behavior as normal pins)
+            try {
+              if (!isHost && userMarker && pins[internalId]) {
+                const u = userMarker.getLatLng();
+                const deg = bearingFromLatLon(u.lat, u.lng, e.latlng.lat, e.latlng.lng);
+                pins[internalId].bearing = deg;
+                // inform host by emitting updateBearing using the original placementId and clientId
+                socket.emit('updateBearing', { id: placementId, bearing: deg, clientId: socket.id });
+                // update overlay/sidebar UI locally
+                try { renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'RF'); } catch(e){}
+                try { renderSidebarEntry(internalId); } catch(e){}
+              }
+            } catch(e) { /* ignore bearing errors */ }
+            // ----------------------------------------------------------------------------------
+
             // notify server (server will echo and also update radius)
             socket.emit('newPin', { id: placementId, groupId: currentRfGroupId, lat: e.latlng.lat, lon: e.latlng.lng, pinColor: rfColor, rf: true });
             socket.emit('updateRadius', { id: placementId, radius: 5000, color: rfColor });
@@ -852,8 +885,19 @@ radarBtn && radarBtn.addEventListener('click', ()=> {
             // offline/local behavior unchanged
             const internalId = `local_${placementId}`;
             addPin(internalId, e.latlng.lat, e.latlng.lng, (clientNameInput && clientNameInput.value) || clientName || 'Local', 'local', '#20c933', true, currentRfGroupId, null);
-            applyRemoteRadius(internalId, 5000, '#20c933');
-            try { renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'RF'); } catch(e){/*ignore*/}
+            // offline: compute bearing if userMarker exists
+            try {
+              if (!isHost && userMarker && pins[internalId]) {
+                const u = userMarker.getLatLng();
+                const deg = bearingFromLatLon(u.lat, u.lng, e.latlng.lat, e.latlng.lng);
+                pins[internalId].bearing = deg;
+                renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'RF');
+                renderSidebarEntry(internalId);
+              } else {
+                applyRemoteRadius(internalId, 5000, '#20c933');
+                try { renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'RF'); } catch(e){/*ignore*/}
+              }
+            } catch(e) { applyRemoteRadius(internalId, 5000, '#20c933'); try { renderOverlayEntry(internalId, e.latlng.lat, e.latlng.lng, 'RF'); } catch(e){} }
           }
         } else if (isPinMode) {
           const placementId = Date.now().toString() + '_' + Math.random().toString(36).slice(2,7);
@@ -1563,52 +1607,88 @@ radarBtn && radarBtn.addEventListener('click', ()=> {
   }
 
   // --- Lines rendering for user-dot -> pins ---
-  function updateLines() {
-    for (const k in lines) { try { map.removeLayer(lines[k]); } catch(e){} delete lines[k]; }
-    const LINE_COLOR = '#ff4d4f';
-    if (isHost) {
-      Object.entries(userDots).forEach(([clientId, dot]) => {
-        if (!dot || !dot.getLatLng) return;
-        if (selectedClientId && selectedClientId !== clientId) return;
-        const dotLL = dot.getLatLng();
-        Object.entries(pins).forEach(([pinId, pin]) => {
-          if (pin.clientId === clientId && pin.marker) {
-            const poly = L.polyline([dotLL, pin.marker.getLatLng()], { color: LINE_COLOR, weight:2, opacity:0.9 }).addTo(map);
-            const dist = (dotLL.distanceTo(pin.marker.getLatLng())/1000).toFixed(2) + ' km';
-            // show bearing if available, else compute
-            let bearingVal = (typeof pin.bearing === 'number' && !isNaN(pin.bearing)) ? pin.bearing : null;
-            if (bearingVal === null && pin.marker && typeof pin.marker.getLatLng === 'function') {
-              const pll = pin.marker.getLatLng();
-              bearingVal = bearingFromLatLon(dotLL.lat, dotLL.lng, pll.lat, pll.lng);
-            }
-            const label = `${dist} • ${formatBearing(bearingVal)}°`;
-            poly.bindTooltip(label, { permanent: true, direction: 'center', className: 'line-tooltip' });
-            lines[pinId] = poly;
-          }
-        });
-      });
-    } else {
-      if (!userMarker || !userMarker.getLatLng) return;
-      const userLL = userMarker.getLatLng();
+ function updateLines() {
+  // remove existing visible lines + hit lines
+  for (const k in lines) { try { map.removeLayer(lines[k]); } catch(e){} delete lines[k]; }
+  for (const k in hitLines) { try { map.removeLayer(hitLines[k]); } catch(e){} delete hitLines[k]; }
+
+  const LINE_COLOR = '#ff4d4f';
+  const VISIBLE_WEIGHT = 2;   // what the user sees
+  const HIT_WEIGHT = 14;      // how wide the hover target is (increase to be more tolerant)
+
+  // Helper to create a visible polyline + invisible wide 'hit' line bound to hover
+  function createHoverableLine(latlngs, labelText) {
+    // visible slim polyline
+    const vis = L.polyline(latlngs, { color: LINE_COLOR, weight: VISIBLE_WEIGHT, opacity: 0.9 }).addTo(map);
+    // invisible but interactive wide polyline (captures hover)
+    const hit = L.polyline(latlngs, { color: LINE_COLOR, weight: HIT_WEIGHT, opacity: 0.0, interactive: true }).addTo(map);
+
+    // ensure visible line sits above the hit-target visually
+    try { vis.bringToFront(); } catch(e){}
+
+    // Attach tooltip to the visible line (so the tooltip appears centered on the visible line)
+    vis.bindTooltip(labelText, { permanent: false, direction: 'center', className: 'line-tooltip' });
+
+    // When user moves pointer near the line (i.e. over the hit polyline) show/hide the tooltip on the visible polyline
+    let closeTimer = null;
+    hit.on('mouseover', function() {
+      if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
+      try { vis.openTooltip(); } catch(e) {}
+    });
+    // small delay on mouseout helps prevent flicker if pointer moves briefly
+    hit.on('mouseout', function() {
+      if (closeTimer) clearTimeout(closeTimer);
+      closeTimer = setTimeout(() => { try { vis.closeTooltip(); } catch(e){} }, 70);
+    });
+
+    return { visible: vis, hit: hit };
+  }
+
+  if (isHost) {
+    Object.entries(userDots).forEach(([clientId, dot]) => {
+      if (!dot || !dot.getLatLng) return;
+      if (selectedClientId && selectedClientId !== clientId) return;
+      const dotLL = dot.getLatLng();
       Object.entries(pins).forEach(([pinId, pin]) => {
-        if (socket && pinId.startsWith(socket.id) && pin.marker) {
-          const poly = L.polyline([userLL, pin.marker.getLatLng()], { color: LINE_COLOR, weight:2, opacity:0.9 }).addTo(map);
-          const dist = (userLL.distanceTo(pin.marker.getLatLng())/1000).toFixed(2) + ' km';
-          // prefer stored bearing; if not present compute
+        if (pin.clientId === clientId && pin.marker) {
+          const pll = pin.marker.getLatLng();
+          const latlngs = [dotLL, pll];
+          const dist = (dotLL.distanceTo(pll)/1000).toFixed(2) + ' km';
+          // show bearing if available, else compute
           let bearingVal = (typeof pin.bearing === 'number' && !isNaN(pin.bearing)) ? pin.bearing : null;
-          if (bearingVal === null && pin.marker && typeof pin.marker.getLatLng === 'function') {
-            const pll = pin.marker.getLatLng();
-            bearingVal = bearingFromLatLon(userLL.lat, userLL.lng, pll.lat, pll.lng);
-            // store it locally (so overlay shows), but do not emit if it's already been emitted
-            try { pin.bearing = bearingVal; } catch(e){}
-          }
+          if (bearingVal === null) bearingVal = bearingFromLatLon(dotLL.lat, dotLL.lng, pll.lat, pll.lng);
           const label = `${dist} • ${formatBearing(bearingVal)}°`;
-          poly.bindTooltip(label, { permanent: true, direction: 'center', className: 'line-tooltip' });
-          lines[pinId] = poly;
+
+          const { visible, hit } = createHoverableLine(latlngs, label);
+          // store visible as before for compatibility; also track hit for cleanup
+          lines[pinId] = visible;
+          hitLines[pinId] = hit;
         }
       });
-    }
+    });
+  } else {
+    if (!userMarker || !userMarker.getLatLng) return;
+    const userLL = userMarker.getLatLng();
+    Object.entries(pins).forEach(([pinId, pin]) => {
+      if (socket && pinId.startsWith(socket.id) && pin.marker) {
+        const pll = pin.marker.getLatLng();
+        const latlngs = [userLL, pll];
+        const dist = (userLL.distanceTo(pll)/1000).toFixed(2) + ' km';
+        // prefer stored bearing; if not present compute
+        let bearingVal = (typeof pin.bearing === 'number' && !isNaN(pin.bearing)) ? pin.bearing : null;
+        if (bearingVal === null) {
+          bearingVal = bearingFromLatLon(userLL.lat, userLL.lng, pll.lat, pll.lng);
+          try { pin.bearing = bearingVal; } catch(e){}
+        }
+        const label = `${dist} • ${formatBearing(bearingVal)}°`;
+
+        const { visible, hit } = createHoverableLine(latlngs, label);
+        lines[pinId] = visible;
+        hitLines[pinId] = hit;
+      }
+    });
   }
+}
 
   // --- User dot ---
   function placeUserDot(latlng, renderOnly, clientName, userDotColor=null) {
