@@ -1,4 +1,4 @@
-// map.js (merged part1 + part2) - updated per user requests
+// map.js (merged part1 + part2 + part3) - updated per user requests
 // --- Shared ID state (user-visible group IDs) ---
 let currentPinGroupId = "pin-101";   // all normal pins use this until regenerated
 let currentRfGroupId  = "rf-201";    // all RF pins use this until regenerated
@@ -10,7 +10,7 @@ const groupCounters = { [currentPinGroupId]: 0, [currentRfGroupId]: 0, [currentR
 const groupPins = {};   // groupId -> array of internal pin ids (in insertion order)
 const groupLines = {};  // groupId -> L.Polyline (dotted)
 
-// --- Helpers: marker SVG, shape icons, geodesic math ---
+// ---------- geodesic helpers, icons, escape etc. ----------
 function createSvgIconDataUrl(hexColor='#ff4d4f', size=[24,38]) {
   const w = size[0], h = size[1];
   const svg = `
@@ -287,6 +287,268 @@ document.addEventListener('DOMContentLoaded', async () => {
     #chat-send { padding:8px 12px; border-radius:8px; border:1px solid #e6e9ef; background:#1e88e5; color:#fff; cursor:pointer; }
   `;
   document.head.appendChild(_chatStyle);
+
+  // ---------- Inserted from partial: tile/cache/prefetch helpers ----------
+  // tile fetching configuration
+  const SEA_BACKGROUND = '#87CEEB';
+  const TILE_EXTENSIONS = ['png', 'jpg'];
+  const FETCH_CONCURRENCY = 6;
+
+  // small transparent gif fallback
+  const TRANSPARENT_1PX = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+
+  // helper convert ArrayBuffer -> base64 string
+  function arrayBufferToBase64(buffer) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  }
+
+  // ---------- Custom TileLayer implementation ----------
+  // Create a custom Leaflet tile layer that will:
+  // 1) check local app 'India Tiles' (packaged)
+  // 2) check client's cache (userData/tile-cache)
+  // 3) fetch from host /tiles/{z}/{x}/{y}.{ext} then save to cache
+  const CustomTileLayer = L.TileLayer.extend({
+    createTile: function(coords, done) {
+      const tile = document.createElement('img');
+      tile.alt = '';
+      tile.setAttribute('role','presentation');
+      // sizing
+      const size = this.getTileSize();
+      tile.width = size.x; tile.height = size.y;
+      tile.style.background = SEA_BACKGROUND;
+      tile.decoded = false;
+
+      const z = coords.z, x = coords.x, y = coords.y;
+      const self = this;
+
+      // completed callback for Leaflet
+      function finish(ok) {
+        if (ok) done(null, tile); else done(null, tile);
+      }
+
+      (async () => {
+        try {
+          // 1) try local packaged tiles
+          for (const ext of TILE_EXTENSIONS) {
+            const resLocal = await window.electronAPI.checkLocalTile(z, x, y, ext);
+            if (resLocal && resLocal.exists && resLocal.path) {
+              tile.src = resLocal.path;
+              return finish(true);
+            }
+          }
+
+          // 2) try client cache
+          for (const ext of TILE_EXTENSIONS) {
+            const resCache = await window.electronAPI.checkCacheTile(z, x, y, ext);
+            if (resCache && resCache.exists && resCache.path) {
+              tile.src = resCache.path;
+              return finish(true);
+            }
+          }
+
+          // 3) fetch from host (try png then jpg)
+          if (!serverUrl) {
+            // no server URL available; show transparent tile
+            tile.src = TRANSPARENT_1PX;
+            return finish(false);
+          }
+          for (const ext of TILE_EXTENSIONS) {
+            const tileUrl = `${serverUrl.replace(/\/$/,'')}/tiles/${z}/${x}/${y}.${ext}`;
+            try {
+              const resp = await fetch(tileUrl, { cache: 'no-cache' });
+              if (!resp.ok) {
+                // try next ext
+                continue;
+              }
+              const arrayBuffer = await resp.arrayBuffer();
+              // convert to base64 to send to main
+              const base64 = arrayBufferToBase64(arrayBuffer);
+              const saveRes = await window.electronAPI.saveCacheTile(z, x, y, ext, base64);
+              if (saveRes && saveRes.ok && saveRes.path) {
+                tile.src = saveRes.path;
+                return finish(true);
+              } else {
+                // fallback: create blob url to show immediately
+                const blob = new Blob([arrayBuffer], { type: resp.headers.get('content-type') || `image/${ext}` });
+                tile.src = URL.createObjectURL(blob);
+                // attempt saving in background (best-effort)
+                window.electronAPI.saveCacheTile(z, x, y, ext, base64).catch(()=>{});
+                return finish(true);
+              }
+            } catch (err) {
+              // try next ext
+              continue;
+            }
+          }
+
+          // no tile found anywhere -> use transparent placeholder; background will show SEA_BACKGROUND
+          tile.src = TRANSPARENT_1PX;
+          return finish(false);
+        } catch (err) {
+          console.error('createTile error', err);
+          tile.src = TRANSPARENT_1PX;
+          return finish(false);
+        }
+      })();
+
+      // handle generic image load errors
+      tile.onerror = () => {
+        tile.src = TRANSPARENT_1PX;
+        finish(false);
+      };
+
+      return tile;
+    }
+  });
+
+  // instantiate the tile layer (we set maxNativeZoom to 13 and maxZoom to 15)
+  function createCustomTileLayer(urlForLog) {
+    const opts = {
+      minZoom: 3,
+      maxNativeZoom: 13, // tiles provided up to 13
+      maxZoom: 15,
+      tileSize: 256,
+      // keep default attribution etc.
+      attribution: '© Local Tiles'
+    };
+    return new CustomTileLayer('', opts);
+  }
+
+  // ---------- Prefetch logic (for zooms 0..5 inside current viewport) ----------
+  // concurrency-limited queue
+  function TaskQueue(concurrency) {
+    this.concurrency = concurrency;
+    this.running = 0;
+    this.queue = [];
+  }
+  TaskQueue.prototype.push = function(task) {
+    this.queue.push(task);
+    this.next();
+  };
+  TaskQueue.prototype.next = function() {
+    if (this.running >= this.concurrency) return;
+    const task = this.queue.shift();
+    if (!task) return;
+    this.running++;
+    const p = Promise.resolve().then(task);
+    p.finally(() => {
+      this.running--;
+      this.next();
+    });
+  };
+
+  // lat/lon to XYZ tile calculation (Web Mercator)
+  function long2tile(lon, zoom) {
+    return Math.floor((lon + 180) / 360 * Math.pow(2, zoom));
+  }
+  function lat2tile(lat, zoom) {
+    const rad = lat * Math.PI / 180;
+    return Math.floor((1 - Math.log(Math.tan(rad) + 1/Math.cos(rad)) / Math.PI) / 2 * Math.pow(2, zoom));
+  }
+  function latLngToTile(lat, lon, z) {
+    return { x: long2tile(lon, z), y: lat2tile(lat, z) };
+  }
+
+  // prefetch tiles for zooms 0..5 for current map view (small margin)
+  async function prefetchZoomRange(mapInstance, serverUrlToUse, onProgress) {
+    if (!mapInstance || !serverUrlToUse) return;
+    const zMin = 0, zMax = 5;
+    const q = new TaskQueue(FETCH_CONCURRENCY);
+    const tasks = [];
+    let total = 0, done = 0;
+
+    for (let z = zMin; z <= zMax; z++) {
+      // compute tile range for current map bounds at zoom z
+      const bounds = mapInstance.getBounds();
+      const nw = bounds.getNorthWest();
+      const se = bounds.getSouthEast();
+
+      const nwTile = latLngToTile(nw.lat, nw.lng, z);
+      const seTile = latLngToTile(se.lat, se.lng, z);
+
+      // clamp x,y ranges
+      const xMin = Math.max(0, Math.min(nwTile.x, seTile.x));
+      const xMax = Math.max(nwTile.x, seTile.x);
+      const yMin = Math.max(0, Math.min(nwTile.y, seTile.y));
+      const yMax = Math.max(nwTile.y, seTile.y);
+
+      // expand by 1 tile margin to make panning smooth
+      const margin = 1;
+      for (let x = Math.max(0, xMin - margin); x <= xMax + margin; x++) {
+        for (let y = Math.max(0, yMin - margin); y <= yMax + margin; y++) {
+          total++;
+          const task = async () => {
+            // check local & cache first
+            for (const ext of TILE_EXTENSIONS) {
+              const loc = await window.electronAPI.checkLocalTile(z, x, y, ext);
+              if (loc && loc.exists) {
+                done++; if (onProgress) onProgress(done, total); return;
+              }
+              const cache = await window.electronAPI.checkCacheTile(z, x, y, ext);
+              if (cache && cache.exists) {
+                done++; if (onProgress) onProgress(done, total); return;
+              }
+            }
+            // fetch from host (png then jpg)
+            for (const ext of TILE_EXTENSIONS) {
+              const url = `${serverUrlToUse.replace(/\/$/,'')}/tiles/${z}/${x}/${y}.${ext}`;
+              try {
+                const resp = await fetch(url, { cache: 'no-cache' });
+                if (!resp.ok) continue;
+                const ab = await resp.arrayBuffer();
+                const b64 = arrayBufferToBase64(ab);
+                await window.electronAPI.saveCacheTile(z, x, y, ext, b64);
+                break; // success for this tile
+              } catch (err) {
+                // ignore & try next ext
+              }
+            }
+            done++; if (onProgress) onProgress(done, total);
+          };
+          q.push(task);
+        }
+      }
+    }
+
+    // return promise that resolves when queue empties
+    return new Promise(resolve => {
+      const poll = () => {
+        if (q.running === 0 && q.queue.length === 0) return resolve();
+        setTimeout(poll, 300);
+      };
+      poll();
+    });
+  }
+
+  // small prefetch progress UI
+  function createPrefetchProgressUI() {
+    const wrap = document.createElement('div');
+    wrap.style.position = 'absolute';
+    wrap.style.left = '50%';
+    wrap.style.top = '12px';
+    wrap.style.transform = 'translateX(-50%)';
+    wrap.style.background = 'rgba(255,255,255,0.96)';
+    wrap.style.padding = '8px 12px';
+    wrap.style.borderRadius = '8px';
+    wrap.style.boxShadow = '0 8px 20px rgba(0,0,0,0.12)';
+    wrap.style.zIndex = 4000;
+    wrap.innerHTML = `<div class="pf-text" style="font-size:13px;font-weight:700;margin-bottom:6px">Prefetching tiles...</div>
+      <div style="width:260px;height:8px;background:#eef2f7;border-radius:6px;overflow:hidden">
+        <div class="pf-bar-inner" style="width:0;height:100%;background:#1e88e5"></div>
+      </div>
+      <div style="font-size:12px;color:#6b7280;margin-top:6px">Downloading tiles for current view (0–5). You can continue using the app.</div>`;
+    const containerEl = document.getElementById('map-container') || document.body;
+    containerEl.appendChild(wrap);
+    wrap.style.display = 'none';
+    return wrap;
+  }
+  // ---------- End inserted partial helpers ----------
 
   try {
     const hosts = await window.electronAPI.discoverHosts();
@@ -575,6 +837,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       redrawGroupLine(groupId);
     }
   }
+
   // helper: remove id from group and redraw or remove
   function removeFromGroup(groupId, internalId) {
     if (!groupId || !groupPins[groupId]) return;
@@ -673,61 +936,60 @@ document.addEventListener('DOMContentLoaded', async () => {
     pinBtn.textContent = `Pin Mode ${isPinMode? 'ON':'OFF'}`;
   });
 
-// RF toggle - ensure mutual exclusivity (replace existing rfBtn listener with this)
-const rfBtn = document.getElementById('rf-toggle-btn');
-let isRFMode = false;
-rfBtn && rfBtn.addEventListener('click', ()=> {
-  isRFMode = !isRFMode;
+ // RF toggle - ensure mutual exclusivity (replace existing rfBtn listener with this)
+ const rfBtn = document.getElementById('rf-toggle-btn');
+ let isRFMode = false;
+ rfBtn && rfBtn.addEventListener('click', ()=> {
+   isRFMode = !isRFMode;
 
-  if (isRFMode) {
-    // Turn off Radar if it was on
-    isRadarMode = false;
-    if (radarBtn) {
-      radarBtn.classList.remove('active');
-      radarBtn.textContent = 'Radar Mode OFF';
-    }
+   if (isRFMode) {
+     // Turn off Radar if it was on
+     isRadarMode = false;
+     if (radarBtn) {
+       radarBtn.classList.remove('active');
+       radarBtn.textContent = 'Radar Mode OFF';
+     }
 
-    // Also turn off Pin/User modes to avoid confusion
-    isPinMode = false;
-    pinBtn.classList.remove('active');
-    pinBtn.textContent = 'Pin Mode OFF';
+     // Also turn off Pin/User modes to avoid confusion
+     isPinMode = false;
+     pinBtn.classList.remove('active');
+     pinBtn.textContent = 'Pin Mode OFF';
 
-    isUserMode = false;
-    userBtn.classList.remove('active');
-    userBtn.textContent = 'User Mode OFF';
-  }
+     isUserMode = false;
+     userBtn.classList.remove('active');
+     userBtn.textContent = 'User Mode OFF';
+   }
 
-  rfBtn.classList.toggle('active', isRFMode);
-  rfBtn.textContent = `RF Mode ${isRFMode ? 'ON' : 'OFF'}`;
-});
+   rfBtn.classList.toggle('active', isRFMode);
+   rfBtn.textContent = `RF Mode ${isRFMode ? 'ON' : 'OFF'}`;
+ });
 
-// Radar toggle - ensure mutual exclusivity with Pin & RF (replace existing radarBtn listener with this)
-let isRadarMode = false;
-radarBtn && radarBtn.addEventListener('click', ()=> {
-  isRadarMode = !isRadarMode;
+ // Radar toggle - ensure mutual exclusivity with Pin & RF (replace existing radarBtn listener with this)
+ let isRadarMode = false;
+ radarBtn && radarBtn.addEventListener('click', ()=> {
+   isRadarMode = !isRadarMode;
 
-  if (isRadarMode) {
-    // Turn off RF if it was on
-    isRFMode = false;
-    if (rfBtn) {
-      rfBtn.classList.remove('active');
-      rfBtn.textContent = 'RF Mode OFF';
-    }
+   if (isRadarMode) {
+     // Turn off RF if it was on
+     isRFMode = false;
+     if (rfBtn) {
+       rfBtn.classList.remove('active');
+       rfBtn.textContent = 'RF Mode OFF';
+     }
 
-    // Also turn off Pin/User modes to avoid confusion
-    isPinMode = false;
-    pinBtn.classList.remove('active');
-    pinBtn.textContent = 'Pin Mode OFF';
+     // Also turn off Pin/User modes to avoid confusion
+     isPinMode = false;
+     pinBtn.classList.remove('active');
+     pinBtn.textContent = 'Pin Mode OFF';
 
-    isUserMode = false;
-    userBtn.classList.remove('active');
-    userBtn.textContent = 'User Mode OFF';
-  }
+     isUserMode = false;
+     userBtn.classList.remove('active');
+     userBtn.textContent = 'User Mode OFF';
+   }
 
-  radarBtn.classList.toggle('active', isRadarMode);
-  radarBtn.textContent = `Radar Mode ${isRadarMode ? 'ON' : 'OFF'}`;
-});
-
+   radarBtn.classList.toggle('active', isRadarMode);
+   radarBtn.textContent = `Radar Mode ${isRadarMode ? 'ON' : 'OFF'}`;
+ });
 
   // Clear
   clearBtn && clearBtn.addEventListener('click', () => {
@@ -815,14 +1077,14 @@ radarBtn && radarBtn.addEventListener('click', ()=> {
         maxZoom: 15,
       }).setView([20.5937,78.9629], 5);
 
-      // tileTemplate server - tile layer uses maxNativeZoom=10 so zoom 11-15 are scaled level-10 tiles
-      const tileTemplate = `${serverUrl.replace(/\/$/, '')}/tiles/{z}/{x}/{y}.png`;
-      L.tileLayer(tileTemplate, {
-        minZoom: 3,
-        maxZoom: 15,
-        maxNativeZoom: 10, // <- this makes 11-15 scale the z=10 tiles
-        attribution:'© Local Tiles'
-      }).addTo(map);
+      // create custom tile layer that uses our fallback/cache logic
+      const customTiles = createCustomTileLayer(url);
+      // add to map
+      customTiles.addTo(map);
+
+      // style map container background for sea color
+      const mapEl = document.getElementById('map');
+      if (mapEl) mapEl.style.background = SEA_BACKGROUND;
 
       map.on('click', e => {
         if (currentShapePlacement && isHost) {
@@ -956,7 +1218,7 @@ radarBtn && radarBtn.addEventListener('click', ()=> {
     socket = io(serverUrl, { query: { isHost: hostFlag ? 'true' : 'false' } });
 
     // debug logs for connection
-    socket.on('connect', () => {
+    socket.on('connect', async () => {
       console.log('socket connected', socket.id, 'isHost=', hostFlag);
       showStatus('Connected to server');
       if (!hostFlag) {
@@ -966,6 +1228,21 @@ radarBtn && radarBtn.addEventListener('click', ()=> {
           userDotColor: (colors && colors.userDotColor) ? colors.userDotColor : userDotColorInput.value
         };
         socket.emit('clientInfo', info);
+
+        // Kick off prefetch of zoom levels 0..5 in viewport using cache strategy
+        // Show small progress if it takes >1s
+        const progressEl = createPrefetchProgressUI();
+        let progressShown = false, timer = setTimeout(()=>{ progressShown = true; progressEl.style.display='block'; }, 900);
+        await prefetchZoomRange(map, serverUrl, (done, total) => {
+          if (progressShown) {
+            progressEl.querySelector('.pf-text').textContent = `Prefetching tiles: ${done}/${total}`;
+            const pct = total ? Math.round(done/total*100) : 0;
+            progressEl.querySelector('.pf-bar-inner').style.width = pct + '%';
+          }
+        });
+        clearTimeout(timer);
+        progressEl.remove();
+        showStatus('Initial tiles prefetched (viewport 0..5)');
       }
     });
 
@@ -1113,6 +1390,7 @@ radarBtn && radarBtn.addEventListener('click', ()=> {
         try { renderOverlayEntry(pinId, p.lat, p.lon, p.rf ? 'RF' : 'Pin'); } catch(e) {}
       }
     });
+
 
 
     // shapes
